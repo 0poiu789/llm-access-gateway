@@ -7,11 +7,12 @@ set -uo pipefail
 MASTER_KEY=$(grep "^LITELLM_MASTER_KEY=" "$ENV_FILE" | cut -d= -f2-)
 PASS=true
 
-# 임시 Key 발급 (24h)
+# 임시 Key 발급 (24h) — alias에 timestamp+pid를 붙여 중복 방지
+ALIAS="test-ttl-check-$(date +%s)-$$"
 RESP=$(curl -sk -X POST "${LITELLM_URL}/key/generate" \
   -H "Authorization: Bearer ${MASTER_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"models": ["user01-gpt-4o"], "duration": "24h", "key_alias": "test-ttl-check"}')
+  -d "{\"models\": [\"user01-gpt-4o\"], \"duration\": \"24h\", \"key_alias\": \"${ALIAS}\"}")
 
 KEY=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
 EXPIRES=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('expires',''))" 2>/dev/null || echo "")
@@ -24,25 +25,22 @@ else
 fi
 
 if [[ -n "$EXPIRES" ]]; then
-  # expires는 ISO timestamp; 현재로부터 23~25h 사이인지 확인
-  HOURS=$(python3 -c "
+  # expires는 ISO timestamp; 현재로부터 23~25h 사이인지 Python에서 직접 판정
+  EXPIRES="$EXPIRES" python3 - <<'PY'
+import os, sys
 from datetime import datetime, timezone
-e = '${EXPIRES}'.replace('Z', '+00:00')
+e = os.environ["EXPIRES"].replace("Z", "+00:00")
 try:
     dt = datetime.fromisoformat(e)
 except Exception:
-    dt = datetime.fromisoformat(e[:-1] + '+00:00')
+    dt = datetime.fromisoformat(e[:-1] + "+00:00")
 now = datetime.now(timezone.utc) if dt.tzinfo else datetime.now()
-diff = (dt - now).total_seconds() / 3600
-print(f'{diff:.1f}')
-" 2>/dev/null || echo "0")
-
-  if (( $(echo "$HOURS >= 23 && $HOURS <= 25" | python3 -c "import sys; ok = eval(sys.stdin.read().strip()); print('1' if ok else '0')") )); then
-    echo "  ✓ TTL ≈ 24h (expires in ${HOURS}h)"
-  else
-    echo "  ⚠ TTL is ${HOURS}h (expected ~24h)"
-    # not failing — config 미적용 가능성
-  fi
+hours = (dt - now).total_seconds() / 3600
+if 23 <= hours <= 25:
+    print(f"  ✓ TTL ≈ 24h (expires in {hours:.1f}h)")
+else:
+    print(f"  ⚠ TTL is {hours:.1f}h (expected ~24h, non-fatal)")
+PY
 else
   echo "  ⚠ No 'expires' field in response (default_key_generate_params may not be applied)"
 fi
