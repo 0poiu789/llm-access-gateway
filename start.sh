@@ -137,7 +137,17 @@ phase_start_remaining() {
   bold "[Phase 5] Start PostgreSQL + LiteLLM + Nginx"
 
   cd "$BASE_DIR"
-  docker compose up -d postgres litellm nginx
+
+  # SSO 자동 감지 — .env에 GENERIC_CLIENT_ID 값이 비어있지 않으면 override 포함
+  COMPOSE_FILES=("-f" "docker-compose.yml")
+  if grep -E "^GENERIC_CLIENT_ID=.+" "$ENV_FILE" >/dev/null 2>&1; then
+    COMPOSE_FILES+=("-f" "docker-compose.sso.yml")
+    info "SSO config detected — including docker-compose.sso.yml"
+    # 후속 docker compose 호출(force-recreate 등)에서도 같은 파일 세트를 쓰도록 export
+    export COMPOSE_FILE="docker-compose.yml:docker-compose.sso.yml"
+  fi
+
+  docker compose "${COMPOSE_FILES[@]}" up -d postgres litellm nginx
   ok "Containers started"
 
   bold "[Phase 5b] Wait for LiteLLM readiness"

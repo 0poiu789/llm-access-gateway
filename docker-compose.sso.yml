@@ -1,0 +1,25 @@
+# ──────────────────────────────────────────────────────────
+# SSO 활성화용 override 파일
+# 사용: docker compose -f docker-compose.yml -f docker-compose.sso.yml up -d
+#       (또는 .env에 GENERIC_CLIENT_ID 값이 채워져 있으면 start.sh가 자동 적용)
+#
+# 주의: LiteLLM OSS는 GENERIC_CLIENT_ID/MICROSOFT_CLIENT_ID/GOOGLE_CLIENT_ID 중
+#       하나라도 set되어 있으면 (값이 비어있어도) Enterprise 라이선스를 요구한다.
+#       따라서 SSO를 사용하지 않을 때는 이 파일을 포함하지 말 것.
+# ──────────────────────────────────────────────────────────
+
+services:
+  litellm:
+    environment:
+      GENERIC_CLIENT_ID: "${GENERIC_CLIENT_ID}"
+      GENERIC_CLIENT_SECRET: "${GENERIC_CLIENT_SECRET}"
+      GENERIC_AUTHORIZATION_ENDPOINT: "${GENERIC_AUTHORIZATION_ENDPOINT}"
+      GENERIC_TOKEN_ENDPOINT: "${GENERIC_TOKEN_ENDPOINT}"
+      GENERIC_USERINFO_ENDPOINT: "${GENERIC_USERINFO_ENDPOINT}"
+      GENERIC_USER_ID_JWT_FIELD: "${GENERIC_USER_ID_JWT_FIELD:-sub}"
+      GENERIC_USER_EMAIL_JWT_FIELD: "${GENERIC_USER_EMAIL_JWT_FIELD:-email}"
+      GENERIC_USER_FIRST_NAME_JWT_FIELD: "${GENERIC_USER_FIRST_NAME_JWT_FIELD:-given_name}"
+      GENERIC_USER_LAST_NAME_JWT_FIELD: "${GENERIC_USER_LAST_NAME_JWT_FIELD:-family_name}"
+      GENERIC_USER_ROLE_JWT_FIELD: "${GENERIC_USER_ROLE_JWT_FIELD:-groups}"
+      ALLOWED_USER_EMAIL_DOMAINS: "${ALLOWED_USER_EMAIL_DOMAINS:-}"
+      DEFAULT_USER_ROLES_LITELLM_SSO: "${DEFAULT_USER_ROLES_LITELLM_SSO:-internal_user_viewer}"

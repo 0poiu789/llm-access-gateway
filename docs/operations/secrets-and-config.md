@@ -210,25 +210,59 @@ echo "  ✓ LiteLLM recreated with new keys"
 
 ### 4.2 사내 IdP SSO 활성화 (선택, 운영 시 필수)
 
-PoC 기본값에서는 SSO가 비활성. Master Key 또는 발급된 Virtual Key로 인증한다. SSO를 켜려면 `.env`의 다음 항목을 사내 IdP에서 발급받은 값으로 채운다.
+PoC 기본값에서는 SSO가 비활성. Master Key 또는 발급된 Virtual Key로 인증한다.
+
+> ⚠️ **LiteLLM OSS 제약**: `GENERIC_CLIENT_ID`, `MICROSOFT_CLIENT_ID`, `GOOGLE_CLIENT_ID` 중 하나라도 컨테이너 환경변수에 **set되어 있기만 하면 (빈 값이라도) Enterprise 라이선스를 요구**한다 (응답: 403 `premium_user`). 따라서 본 PoC는 이 변수들을 별도 override 파일 `docker-compose.sso.yml`에 분리하여, **SSO를 사용할 때만 해당 파일을 포함**시키는 구조로 설계되었다.
+
+**활성화 절차:**
 
 ```bash
-# .env 편집
+# 1. .env에 SSO 값 추가 (최초에는 .env에 GENERIC_* 라인이 없을 수 있으므로 추가)
+cat >> .env << 'EOF'
+
+# OIDC SSO
 GENERIC_CLIENT_ID=<IdP에서 발급받은 OIDC 클라이언트 ID>
 GENERIC_CLIENT_SECRET=<IdP 클라이언트 시크릿>
 GENERIC_AUTHORIZATION_ENDPOINT=https://idp.사내도메인/oauth/authorize
 GENERIC_TOKEN_ENDPOINT=https://idp.사내도메인/oauth/token
 GENERIC_USERINFO_ENDPOINT=https://idp.사내도메인/oauth/userinfo
 
-# 클레임 매핑은 IdP 토큰 구조에 맞게 조정 (기본값으로 대부분 OK)
+# 클레임 매핑 (IdP 토큰 구조에 맞게 조정. 기본값으로 대부분 OK)
 GENERIC_USER_ID_JWT_FIELD=sub
 GENERIC_USER_EMAIL_JWT_FIELD=email
 GENERIC_USER_FIRST_NAME_JWT_FIELD=given_name
 GENERIC_USER_LAST_NAME_JWT_FIELD=family_name
 GENERIC_USER_ROLE_JWT_FIELD=groups
 
-# 도메인 화이트리스트 (외부 도메인 차단)
+# 도메인 화이트리스트
 ALLOWED_USER_EMAIL_DOMAINS=사내도메인.com
+DEFAULT_USER_ROLES_LITELLM_SSO=internal_user_viewer
+EOF
+
+# 2. start.sh가 GENERIC_CLIENT_ID 값을 감지해 자동으로 docker-compose.sso.yml을 포함시킨다.
+./start.sh
+```
+
+**수동으로 SSO를 다루려면** (start.sh를 거치지 않을 때):
+
+```bash
+# SSO 활성화 — 두 compose 파일을 함께 사용
+docker compose -f docker-compose.yml -f docker-compose.sso.yml up -d --force-recreate litellm
+
+# 또는 환경변수 한 번 export 후 일반 명령
+export COMPOSE_FILE=docker-compose.yml:docker-compose.sso.yml
+docker compose up -d --force-recreate litellm
+```
+
+**SSO 비활성화로 되돌리기:**
+
+```bash
+# .env에서 GENERIC_* 모두 제거
+sed -i '/^GENERIC_/d; /^ALLOWED_USER_EMAIL_DOMAINS/d; /^DEFAULT_USER_ROLES_LITELLM_SSO/d' .env
+
+# COMPOSE_FILE 환경변수 해제 후 재기동
+unset COMPOSE_FILE
+docker compose up -d --force-recreate litellm
 ```
 
 **IdP에서 사전 준비할 것:**
@@ -237,8 +271,6 @@ ALLOWED_USER_EMAIL_DOMAINS=사내도메인.com
 - id_token에 `groups` 클레임 포함되도록 매핑
 
 상세 절차는 [D2 §6, §9](../design/D2-system-requirements.md) 참조.
-
-설정 후 `.env`를 갱신했으므로 `docker compose up -d --force-recreate litellm`으로 적용.
 
 ### 4.3 운영용 TLS 인증서 적용 (운영 시 필수)
 
