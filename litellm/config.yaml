@@ -1,0 +1,139 @@
+# ══════════════════════════════════════════════════════════
+# LiteLLM Proxy — 사용자별 OpenAI Key 매핑 + 24h Virtual Key TTL
+# api_key의 "os.environ/USERnn_OPENAI_KEY" 표기는 OpenBao의
+#   secret/litellm/USERnn_OPENAI_KEY 의 'key' 필드로 해석된다.
+# ══════════════════════════════════════════════════════════
+
+model_list:
+  # User 01
+  - model_name: user01-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER01_OPENAI_KEY"
+  - model_name: user01-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER01_OPENAI_KEY"
+
+  # User 02
+  - model_name: user02-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER02_OPENAI_KEY"
+  - model_name: user02-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER02_OPENAI_KEY"
+
+  # User 03
+  - model_name: user03-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER03_OPENAI_KEY"
+  - model_name: user03-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER03_OPENAI_KEY"
+
+  # User 04
+  - model_name: user04-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER04_OPENAI_KEY"
+  - model_name: user04-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER04_OPENAI_KEY"
+
+  # User 05
+  - model_name: user05-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER05_OPENAI_KEY"
+  - model_name: user05-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER05_OPENAI_KEY"
+
+  # User 06
+  - model_name: user06-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER06_OPENAI_KEY"
+  - model_name: user06-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER06_OPENAI_KEY"
+
+  # User 07
+  - model_name: user07-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER07_OPENAI_KEY"
+  - model_name: user07-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER07_OPENAI_KEY"
+
+  # User 08
+  - model_name: user08-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER08_OPENAI_KEY"
+  - model_name: user08-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER08_OPENAI_KEY"
+
+  # User 09
+  - model_name: user09-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER09_OPENAI_KEY"
+  - model_name: user09-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER09_OPENAI_KEY"
+
+  # User 10
+  - model_name: user10-gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/USER10_OPENAI_KEY"
+  - model_name: user10-o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: "os.environ/USER10_OPENAI_KEY"
+
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+  database_url: "os.environ/DATABASE_URL"
+  proxy_base_url: "os.environ/PROXY_BASE_URL"
+
+  # OpenBao (Vault 호환)
+  key_management_system: "hashicorp_vault"
+  key_management_settings:
+    store_virtual_keys: true
+    prefix_for_stored_virtual_keys: "litellm/vkeys/"
+    access_mode: "read_and_write"
+
+  # 입출력 로그
+  store_model_in_db: true
+  store_prompts_in_spend_logs: true
+  maximum_spend_logs_retention_period: "90d"
+  maximum_spend_logs_retention_interval: "1d"
+
+  # 사용자 셀프서비스 + Default 24h Key TTL
+  allow_user_auth: true
+  default_key_generate_params:
+    duration: "24h"
+
+
+router_settings:
+  num_retries: 2
+  timeout: 120
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false

@@ -1,0 +1,111 @@
+x-common: &common
+  restart: unless-stopped
+
+services:
+  openbao:
+    <<: *common
+    image: openbao/openbao:latest
+    container_name: openbao
+    cap_add:
+      - IPC_LOCK
+    environment:
+      BAO_ADDR: "http://0.0.0.0:8200"
+      SKIP_SETCAP: "true"
+    volumes:
+      - ./openbao/config:/openbao/config:ro
+      - ./openbao/data:/openbao/data
+      - ./openbao/logs:/openbao/logs
+    command: server -config=/openbao/config/openbao.hcl
+    networks:
+      - llm-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8200/v1/sys/health?standbyok=true || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  postgres:
+    <<: *common
+    image: postgres:16-alpine
+    container_name: litellm-db
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - llm-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  litellm:
+    <<: *common
+    image: ghcr.io/berriai/litellm-database:main-latest
+    container_name: litellm-proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openbao:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      PROXY_BASE_URL: "${PROXY_BASE_URL}"
+
+      # OpenBao (Vault 호환)
+      HCP_VAULT_ADDR: "http://openbao:8200"
+      HCP_VAULT_TOKEN: "${OPENBAO_ROOT_TOKEN}"
+      HCP_VAULT_NAMESPACE: ""
+      HCP_VAULT_PROJ_ID: ""
+      HCP_VAULT_APP_NAME: ""
+      VAULT_ADDR: "http://openbao:8200"
+      VAULT_TOKEN: "${OPENBAO_ROOT_TOKEN}"
+      VAULT_NAMESPACE: ""
+
+      # OIDC SSO (선택)
+      GENERIC_CLIENT_ID: "${GENERIC_CLIENT_ID}"
+      GENERIC_CLIENT_SECRET: "${GENERIC_CLIENT_SECRET}"
+      GENERIC_AUTHORIZATION_ENDPOINT: "${GENERIC_AUTHORIZATION_ENDPOINT}"
+      GENERIC_TOKEN_ENDPOINT: "${GENERIC_TOKEN_ENDPOINT}"
+      GENERIC_USERINFO_ENDPOINT: "${GENERIC_USERINFO_ENDPOINT}"
+      GENERIC_USER_ID_JWT_FIELD: "${GENERIC_USER_ID_JWT_FIELD}"
+      GENERIC_USER_EMAIL_JWT_FIELD: "${GENERIC_USER_EMAIL_JWT_FIELD}"
+      GENERIC_USER_FIRST_NAME_JWT_FIELD: "${GENERIC_USER_FIRST_NAME_JWT_FIELD}"
+      GENERIC_USER_LAST_NAME_JWT_FIELD: "${GENERIC_USER_LAST_NAME_JWT_FIELD}"
+      GENERIC_USER_ROLE_JWT_FIELD: "${GENERIC_USER_ROLE_JWT_FIELD}"
+      ALLOWED_USER_EMAIL_DOMAINS: "${ALLOWED_USER_EMAIL_DOMAINS}"
+      DEFAULT_USER_ROLES_LITELLM_SSO: "${DEFAULT_USER_ROLES_LITELLM_SSO}"
+
+      STORE_MODEL_IN_DB: "True"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: --config /app/config.yaml --port 4000
+    networks:
+      - llm-net
+
+  nginx:
+    <<: *common
+    image: nginx:alpine
+    container_name: llm-nginx
+    depends_on:
+      - litellm
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - llm-net
+
+networks:
+  llm-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
