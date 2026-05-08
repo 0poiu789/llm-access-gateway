@@ -111,12 +111,9 @@ general_settings:
   database_url: "os.environ/DATABASE_URL"
   proxy_base_url: "os.environ/PROXY_BASE_URL"
 
-  # OpenBao (Vault 호환)
-  key_management_system: "hashicorp_vault"
-  key_management_settings:
-    store_virtual_keys: true
-    prefix_for_stored_virtual_keys: "litellm/vkeys/"
-    access_mode: "read_and_write"
+  # 주의: LiteLLM OSS는 Hashicorp Vault 연동을 지원하지 않으므로
+  # USERnn_OPENAI_KEY는 start.sh가 OpenBao → .env → 컨테이너 env 로 전달한다.
+  # OpenBao는 여전히 시크릿의 source of truth로 유지된다.
 
   # 입출력 로그
   store_model_in_db: true
