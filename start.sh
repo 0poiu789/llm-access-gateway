@@ -60,24 +60,38 @@ phase_bootstrap() {
   # .env
   if [[ ! -f "$ENV_FILE" ]]; then
     info "Creating .env from .env.example with random secrets..."
+
+    # 호스트 IP 자동 감지 (PROXY_BASE_URL 기본값으로 사용)
+    local host_ip
+    host_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)
+    if [[ -z "$host_ip" ]]; then
+      host_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    fi
+    if [[ -z "$host_ip" || "$host_ip" == "127.0.0.1" ]]; then
+      host_ip="localhost"
+    fi
+    info "Detected host IP for PROXY_BASE_URL: ${host_ip}"
+
     cp "${BASE_DIR}/.env.example" "$ENV_FILE"
     local mk pp
     mk="sk-master-$(openssl rand -hex 24)"
     pp="$(openssl rand -hex 16)"
-    python3 -c "
-import re
-p = '$ENV_FILE'
-mk = '$mk'
-pp = '$pp'
+    HOST_IP="$host_ip" MK="$mk" PP="$pp" ENV_FILE="$ENV_FILE" python3 - <<'PY'
+import os, re
+p = os.environ["ENV_FILE"]
+url = f"https://{os.environ['HOST_IP']}"
 s = open(p).read()
-s = re.sub(r'^LITELLM_MASTER_KEY=.*$', f'LITELLM_MASTER_KEY={mk}', s, flags=re.M)
-s = re.sub(r'^POSTGRES_PASSWORD=.*$', f'POSTGRES_PASSWORD={pp}', s, flags=re.M)
+s = re.sub(r'^LITELLM_MASTER_KEY=.*$', f"LITELLM_MASTER_KEY={os.environ['MK']}", s, flags=re.M)
+s = re.sub(r'^POSTGRES_PASSWORD=.*$', f"POSTGRES_PASSWORD={os.environ['PP']}", s, flags=re.M)
+s = re.sub(r'^PROXY_BASE_URL=.*$', f"PROXY_BASE_URL={url}", s, flags=re.M)
 open(p, 'w').write(s)
-"
+PY
     chmod 600 "$ENV_FILE"
-    ok ".env created (chmod 600)"
+    ok ".env created (chmod 600, PROXY_BASE_URL=https://${host_ip})"
+    export ENV_REGENERATED=true
   else
     ok ".env exists"
+    export ENV_REGENERATED=false
   fi
 
   # TLS self-signed cert
@@ -141,6 +155,45 @@ phase_init_secrets() {
 
   bold "[Phase 4] Load user OpenAI keys (placeholders)"
   bash "${BASE_DIR}/scripts/02-load-secrets.sh"
+}
+
+# ════════════════════════════════════════════
+# Phase 4b: Align PostgreSQL password if .env was regenerated
+# ════════════════════════════════════════════
+phase_align_postgres_password() {
+  if [[ "${ENV_REGENERATED:-false}" != "true" ]]; then
+    return 0
+  fi
+
+  bold "[Phase 4b] Align PostgreSQL password (.env was regenerated)"
+
+  cd "$BASE_DIR"
+  docker compose up -d postgres >/dev/null
+
+  info "Waiting for PostgreSQL to accept connections..."
+  for i in $(seq 1 30); do
+    if docker exec litellm-db pg_isready -U postgres >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  # 첫 init이라 'litellm' DB가 아직 없으면 align 불필요 (compose가 새 비밀번호로 생성함)
+  if ! docker exec litellm-db psql -U litellm -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='litellm'" 2>/dev/null | grep -q "^1$"; then
+    info "PostgreSQL not yet initialized — fresh init will use new password"
+    return 0
+  fi
+
+  # 기존 데이터 볼륨에 옛 비밀번호가 저장되어 있다면 ALTER USER로 동기화
+  local new_pw
+  new_pw=$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)
+  if docker exec litellm-db psql -U litellm -d litellm \
+       -c "ALTER USER litellm WITH PASSWORD '${new_pw}'" >/dev/null 2>&1; then
+    ok "PostgreSQL password aligned with new .env"
+  else
+    warn "Could not ALTER USER on existing PostgreSQL data"
+    warn "If LiteLLM fails to start, run './reset.sh' to wipe and re-init"
+  fi
 }
 
 # ════════════════════════════════════════════
@@ -232,6 +285,7 @@ main() {
   phase_bootstrap
   phase_start_openbao
   phase_init_secrets
+  phase_align_postgres_password
   phase_start_remaining
   phase_register_users
 

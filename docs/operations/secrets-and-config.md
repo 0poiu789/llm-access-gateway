@@ -483,6 +483,33 @@ OpenAI Console에서 즉시 해당 키를 폐기 → §4.1의 3단계 절차(Ope
 
 아니다. 모든 자동 생성 단계는 멱등(idempotent)으로 작성되었다. 이미 존재하는 `.env`, `init-keys.json`, TLS 인증서는 재사용된다. 기존 OpenBao 시크릿도 보존된다.
 
+**Q. `.env`만 삭제하고 `./start.sh` 다시 돌렸더니 LiteLLM이 PostgreSQL 인증 실패(P1000)로 안 뜬다.**
+
+`./start.sh`가 새 .env를 생성할 때 새 랜덤 `POSTGRES_PASSWORD`를 만든다. 그러나 기존 `postgres-data` 볼륨에는 이전 비밀번호가 저장되어 있어 mismatch가 발생한다. **start.sh의 Phase 4b가 이 케이스를 자동 감지하여 `ALTER USER`로 동기화**하므로 최신 코드에서는 그냥 `./start.sh`를 다시 실행하면 된다.
+
+수동 복구가 필요하면:
+
+```bash
+# 옵션 A — 비밀번호 정렬 (DB 데이터 보존)
+NEW_PW=$(grep "^POSTGRES_PASSWORD=" .env | cut -d= -f2-)
+docker compose up -d postgres
+docker exec litellm-db psql -U litellm -d litellm \
+  -c "ALTER USER litellm WITH PASSWORD '${NEW_PW}'"
+docker compose up -d --force-recreate litellm
+
+# 옵션 B — 전체 초기화 (DB 데이터 손실)
+./reset.sh
+./start.sh
+```
+
+**Q. `PROXY_BASE_URL`은 어떻게 결정되는가? IP가 바뀌면?**
+
+`./start.sh`가 .env를 처음 만들 때 호스트의 outbound IP를 `ip route get 1.1.1.1`로 감지하여 `https://<IP>` 형식으로 설정한다. 호스트 IP가 바뀌거나 도메인을 쓰려면 `.env`의 `PROXY_BASE_URL` 값을 직접 편집한 뒤:
+
+```bash
+docker compose up -d --force-recreate litellm
+```
+
 **Q. `reset.sh`는 무엇을 삭제하는가?**
 
 `reset.sh`는 `.env`, `init-keys.json`, OpenBao 데이터, PostgreSQL 볼륨, TLS 인증서, `sample-keys.txt`를 모두 삭제하고 컨테이너를 내린다. **백업 없이 실행하면 모든 데이터를 잃는다.** 사용자 확인을 받은 뒤에만 동작.
