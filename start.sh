@@ -20,6 +20,19 @@ ok()    { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 err()   { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
+# 호스트의 outbound IP 감지 (PROXY_BASE_URL 기본값으로 사용)
+detect_host_ip() {
+  local ip
+  ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)
+  if [[ -z "$ip" ]]; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  fi
+  if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
+    ip="localhost"
+  fi
+  echo "$ip"
+}
+
 # ════════════════════════════════════════════
 # Phase 0: Pre-flight
 # ════════════════════════════════════════════
@@ -57,19 +70,13 @@ phase_bootstrap() {
     "${BASE_DIR}/scripts" \
     "${BASE_DIR}/tests"
 
-  # .env
+  # 호스트 IP 감지 (신규/기존 .env 모두에서 사용)
+  local host_ip
+  host_ip=$(detect_host_ip)
+
+  # .env 생성/갱신
   if [[ ! -f "$ENV_FILE" ]]; then
     info "Creating .env from .env.example with random secrets..."
-
-    # 호스트 IP 자동 감지 (PROXY_BASE_URL 기본값으로 사용)
-    local host_ip
-    host_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)
-    if [[ -z "$host_ip" ]]; then
-      host_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
-    fi
-    if [[ -z "$host_ip" || "$host_ip" == "127.0.0.1" ]]; then
-      host_ip="localhost"
-    fi
     info "Detected host IP for PROXY_BASE_URL: ${host_ip}"
 
     cp "${BASE_DIR}/.env.example" "$ENV_FILE"
@@ -88,10 +95,29 @@ open(p, 'w').write(s)
 PY
     chmod 600 "$ENV_FILE"
     ok ".env created (chmod 600, PROXY_BASE_URL=https://${host_ip})"
-    export ENV_REGENERATED=true
   else
-    ok ".env exists"
-    export ENV_REGENERATED=false
+    # 기존 .env 보존 — 단, PROXY_BASE_URL이 기본값(localhost)이면 감지된 IP로 갱신
+    local current_url
+    current_url=$(grep "^PROXY_BASE_URL=" "$ENV_FILE" | cut -d= -f2- || true)
+    if [[ "$current_url" == "https://localhost" || -z "$current_url" ]] && [[ "$host_ip" != "localhost" ]]; then
+      info "Updating PROXY_BASE_URL in existing .env: ${current_url:-<empty>} → https://${host_ip}"
+      HOST_IP="$host_ip" ENV_FILE="$ENV_FILE" python3 - <<'PY'
+import os, re
+p = os.environ["ENV_FILE"]
+url = f"https://{os.environ['HOST_IP']}"
+s = open(p).read()
+if re.search(r'^PROXY_BASE_URL=.*$', s, flags=re.M):
+    s = re.sub(r'^PROXY_BASE_URL=.*$', f"PROXY_BASE_URL={url}", s, flags=re.M)
+else:
+    if not s.endswith("\n"):
+        s += "\n"
+    s += f"PROXY_BASE_URL={url}\n"
+open(p, 'w').write(s)
+PY
+      ok ".env PROXY_BASE_URL updated to https://${host_ip}"
+    else
+      ok ".env exists (PROXY_BASE_URL=${current_url})"
+    fi
   fi
 
   # TLS self-signed cert
@@ -158,14 +184,11 @@ phase_init_secrets() {
 }
 
 # ════════════════════════════════════════════
-# Phase 4b: Align PostgreSQL password if .env was regenerated
+# Phase 4b: Sync PostgreSQL password from .env (always)
+# 멱등 — 비밀번호가 이미 일치하면 no-op, 다르면 ALTER USER로 정렬
 # ════════════════════════════════════════════
 phase_align_postgres_password() {
-  if [[ "${ENV_REGENERATED:-false}" != "true" ]]; then
-    return 0
-  fi
-
-  bold "[Phase 4b] Align PostgreSQL password (.env was regenerated)"
+  bold "[Phase 4b] Sync PostgreSQL password from .env"
 
   cd "$BASE_DIR"
   docker compose up -d postgres >/dev/null
@@ -178,21 +201,24 @@ phase_align_postgres_password() {
     sleep 1
   done
 
-  # 첫 init이라 'litellm' DB가 아직 없으면 align 불필요 (compose가 새 비밀번호로 생성함)
-  if ! docker exec litellm-db psql -U litellm -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='litellm'" 2>/dev/null | grep -q "^1$"; then
-    info "PostgreSQL not yet initialized — fresh init will use new password"
+  # pg_hba.conf의 'local all all trust' 덕분에 컨테이너 내부 socket 접속은 비밀번호 불필요
+  # 첫 init이라 'litellm' DB가 아직 없거나 user 자체가 없으면 align 불필요
+  if ! docker exec litellm-db psql -h /var/run/postgresql -U litellm -d postgres \
+        -tAc "SELECT 1 FROM pg_database WHERE datname='litellm'" 2>/dev/null | grep -q "^1$"; then
+    info "PostgreSQL DB 'litellm' not yet exists — fresh init will use .env password"
     return 0
   fi
 
-  # 기존 데이터 볼륨에 옛 비밀번호가 저장되어 있다면 ALTER USER로 동기화
+  # ALTER USER로 동기화 (멱등: 같은 비밀번호여도 안전)
   local new_pw
   new_pw=$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)
-  if docker exec litellm-db psql -U litellm -d litellm \
-       -c "ALTER USER litellm WITH PASSWORD '${new_pw}'" >/dev/null 2>&1; then
-    ok "PostgreSQL password aligned with new .env"
+  if docker exec litellm-db psql -h /var/run/postgresql -U litellm -d litellm \
+       -v "pwd=${new_pw}" \
+       -c "ALTER USER litellm WITH PASSWORD :'pwd'" >/dev/null 2>&1; then
+    ok "PostgreSQL password synced from .env"
   else
-    warn "Could not ALTER USER on existing PostgreSQL data"
-    warn "If LiteLLM fails to start, run './reset.sh' to wipe and re-init"
+    warn "Could not sync PostgreSQL password — possible non-trust auth or stale state"
+    warn "If LiteLLM fails to start, run './reset.sh' to wipe and re-init from scratch"
   fi
 }
 
