@@ -149,3 +149,4 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 - [D1 — v1 설계](docs/design/D1-system-requirements.md): Virtual Key 단독 인증 모델
 - [D2 — v2 설계](docs/design/D2-system-requirements.md): SSO 통합 모델 (PoC 기반)
 - [D3 — 구현 플랜](docs/design/D3-implementation-plan.md): 본 PoC 구현 계획
+- [비밀 파일 및 환경 설정 가이드](docs/operations/secrets-and-config.md): 사내 환경 배포 시 어떤 비밀 파일을 어떻게 만들고 채워야 하는지
