@@ -184,41 +184,57 @@ phase_init_secrets() {
 }
 
 # ════════════════════════════════════════════
-# Phase 4b: Sync PostgreSQL password from .env (always)
-# 멱등 — 비밀번호가 이미 일치하면 no-op, 다르면 ALTER USER로 정렬
+# Phase 4b: Ensure pg_hba.conf allows trust auth for internal network
+# 신규 init은 POSTGRES_HOST_AUTH_METHOD=trust로 처리되지만,
+# 기존 데이터 볼륨이 있으면 pg_hba.conf가 옛 scram-sha-256 그대로라
+# .env의 비밀번호와 mismatch가 발생한다. 이를 매번 idempotent하게 정렬한다.
+# 안전성: postgres 포트는 호스트에 노출되지 않으므로 docker 내부 트래픽 한정.
 # ════════════════════════════════════════════
 phase_align_postgres_password() {
-  bold "[Phase 4b] Sync PostgreSQL password from .env"
+  bold "[Phase 4b] Ensure PostgreSQL accepts internal trust auth"
 
   cd "$BASE_DIR"
   docker compose up -d postgres >/dev/null
 
   info "Waiting for PostgreSQL to accept connections..."
   for i in $(seq 1 30); do
-    if docker exec litellm-db pg_isready -U postgres >/dev/null 2>&1; then
+    if docker exec litellm-db pg_isready -U litellm >/dev/null 2>&1; then
       break
     fi
     sleep 1
   done
 
-  # pg_hba.conf의 'local all all trust' 덕분에 컨테이너 내부 socket 접속은 비밀번호 불필요
-  # 첫 init이라 'litellm' DB가 아직 없거나 user 자체가 없으면 align 불필요
-  if ! docker exec litellm-db psql -h /var/run/postgresql -U litellm -d postgres \
-        -tAc "SELECT 1 FROM pg_database WHERE datname='litellm'" 2>/dev/null | grep -q "^1$"; then
-    info "PostgreSQL DB 'litellm' not yet exists — fresh init will use .env password"
+  # pg_hba.conf 상태 확인
+  if docker exec litellm-db grep -qE '^host[ \t]+all[ \t]+all[ \t]+all[ \t]+trust' \
+       /var/lib/postgresql/data/pg_hba.conf 2>/dev/null; then
+    ok "pg_hba.conf already configured for trust auth"
     return 0
   fi
 
-  # ALTER USER로 동기화 (멱등: 같은 비밀번호여도 안전)
-  local new_pw
-  new_pw=$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)
-  if docker exec litellm-db psql -h /var/run/postgresql -U litellm -d litellm \
-       -v "pwd=${new_pw}" \
-       -c "ALTER USER litellm WITH PASSWORD :'pwd'" >/dev/null 2>&1; then
-    ok "PostgreSQL password synced from .env"
+  info "Patching pg_hba.conf (replacing host scram-sha-256 with trust for internal network)..."
+  if ! docker exec litellm-db sh -c '
+    HBA=/var/lib/postgresql/data/pg_hba.conf
+    sed -i -E "/^host[ \t]+all[ \t]+all[ \t]+all[ \t]+/d" "$HBA"
+    echo "host all all all trust" >> "$HBA"
+  ' >/dev/null 2>&1; then
+    warn "Could not patch pg_hba.conf — run ./reset.sh if LiteLLM fails"
+    return 0
+  fi
+
+  # postgres 설정 reload (실패 시 컨테이너 재시작)
+  if docker exec -u postgres litellm-db pg_ctl reload -D /var/lib/postgresql/data \
+       >/dev/null 2>&1; then
+    ok "pg_hba.conf patched and postgres reloaded"
   else
-    warn "Could not sync PostgreSQL password — possible non-trust auth or stale state"
-    warn "If LiteLLM fails to start, run './reset.sh' to wipe and re-init from scratch"
+    info "pg_ctl reload unavailable, restarting postgres container..."
+    docker compose restart postgres >/dev/null
+    for i in $(seq 1 30); do
+      if docker exec litellm-db pg_isready -U litellm >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    ok "postgres restarted with new pg_hba.conf"
   fi
 }
 

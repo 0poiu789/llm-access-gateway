@@ -485,19 +485,26 @@ OpenAI Console에서 즉시 해당 키를 폐기 → §4.1의 3단계 절차(Ope
 
 **Q. `.env`만 삭제하고 `./start.sh` 다시 돌렸더니 LiteLLM이 PostgreSQL 인증 실패(P1000)로 안 뜬다.**
 
-`./start.sh`가 새 .env를 생성할 때 새 랜덤 `POSTGRES_PASSWORD`를 만든다. 그러나 기존 `postgres-data` 볼륨에는 이전 비밀번호가 저장되어 있어 mismatch가 발생한다. **start.sh의 Phase 4b가 이 케이스를 자동 감지하여 `ALTER USER`로 동기화**하므로 최신 코드에서는 그냥 `./start.sh`를 다시 실행하면 된다.
+`./start.sh`가 새 `.env`를 만들 때 새 랜덤 `POSTGRES_PASSWORD`를 생성하지만, 기존 `postgres-data` 볼륨에는 옛 비밀번호가 저장되어 있어 mismatch가 발생한다.
 
-수동 복구가 필요하면:
+**해결**: 본 시스템은 postgres를 docker 내부 네트워크 전용으로 두고 컨테이너 간 TCP를 **trust 인증**으로 처리한다 (postgres 포트가 호스트에 노출되지 않으므로 안전한 절충). `./start.sh`의 Phase 4b가 매번 `pg_hba.conf`를 확인하여 trust 라인이 없으면 자동 패치 후 reload하므로 — 그냥 `./start.sh`를 다시 돌리면 자동 복구된다.
+
+trust 인증 적용으로 `POSTGRES_PASSWORD`는 사실상 vestigial이 되며 LiteLLM의 `DATABASE_URL`에 어떤 값이 있어도 연결 성공한다. 이는 trade-off: 같은 docker 네트워크의 다른 컨테이너에서 postgres에 무인증 접근 가능하므로, **포트 노출이나 외부 네트워크 공유는 절대 허용하지 말 것**.
+
+수동 복구가 필요하면 (start.sh가 어떤 이유로 패치하지 못한 경우):
 
 ```bash
-# 옵션 A — 비밀번호 정렬 (DB 데이터 보존)
-NEW_PW=$(grep "^POSTGRES_PASSWORD=" .env | cut -d= -f2-)
+# pg_hba.conf 직접 패치
 docker compose up -d postgres
-docker exec litellm-db psql -U litellm -d litellm \
-  -c "ALTER USER litellm WITH PASSWORD '${NEW_PW}'"
+docker exec litellm-db sh -c '
+  HBA=/var/lib/postgresql/data/pg_hba.conf
+  sed -i -E "/^host[ \t]+all[ \t]+all[ \t]+all[ \t]+/d" "$HBA"
+  echo "host all all all trust" >> "$HBA"
+'
+docker exec -u postgres litellm-db pg_ctl reload -D /var/lib/postgresql/data
 docker compose up -d --force-recreate litellm
 
-# 옵션 B — 전체 초기화 (DB 데이터 손실)
+# 또는 전체 초기화 (DB 데이터 손실)
 ./reset.sh
 ./start.sh
 ```

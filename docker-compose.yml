@@ -33,6 +33,10 @@ services:
       POSTGRES_DB: litellm
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # 내부 docker 네트워크 전용이므로 trust 인증 사용.
+      # postgres 포트는 호스트에 노출되지 않으며, 같은 docker 네트워크의
+      # litellm 컨테이너만 접근 가능하다.
+      POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
