@@ -37,9 +37,10 @@ fi
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${INIT_KEYS_FILE}'))['root_token'])")
 
 # ── Step 1: config/users.conf의 OpenAI Key를 OpenBao에 적재 ──
+# 4-field 형식: SLOT|EMAIL|NAME|OPENAI_KEY
 log "Pushing OpenAI keys from config/users.conf to OpenBao..."
 for entry in "${USERS[@]}"; do
-  IFS='|' read -r SLOT EMAIL NAME PW KEY <<< "$entry"
+  IFS='|' read -r SLOT EMAIL NAME KEY <<< "$entry"
 
   # SLOT은 user01~user10 형식이어야 함
   if [[ ! "$SLOT" =~ ^user[0-9]{2}$ ]]; then

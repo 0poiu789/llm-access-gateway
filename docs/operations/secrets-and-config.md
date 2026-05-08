@@ -295,13 +295,13 @@ PROXY_BASE_URL=https://llm-gateway.사내도메인.com
 
 ### 4.4 사용자 매핑 변경 (alice/bob → 실제 사내 인원)
 
-`scripts/03-register-users.sh`의 `USERS` 배열이 PoC 샘플 인원(alice@local 등)을 등록한다. 사내 실 인원으로 교체:
+`config/users.conf`의 `USERS` 배열이 PoC 샘플 인원(alice@local 등)을 등록한다. 사내 실 인원으로 교체:
 
 ```bash
-# scripts/03-register-users.sh 편집 — USERS 배열 수정
+# config/users.conf 편집 — USERS 배열 수정 (4-field 포맷)
 USERS=(
-  "honggildong@사내도메인.com user01 홍길동"
-  "kimchulsoo@사내도메인.com   user02 김철수"
+  "user01|honggildong@사내도메인.com|홍길동|sk-proj-실제alice의키"
+  "user02|kimchulsoo@사내도메인.com|김철수|sk-proj-실제bob의키"
   # ... 10명까지
 )
 ADMIN_EMAIL="admin@사내도메인.com"
@@ -309,7 +309,53 @@ ADMIN_EMAIL="admin@사내도메인.com"
 
 수정 후 `./start.sh` 재실행. 멱등이라 안전 (이미 등록된 사용자는 건너뛰고, 새 사용자만 추가).
 
-기존 PoC 샘플 사용자(alice~jack)를 제거하려면 LiteLLM UI 또는 API로 삭제:
+### 4.5 인증 모델 — Virtual Key API 중심 (UI 로그인 X)
+
+> ⚠️ **중요 — LiteLLM OSS 제약**: Internal User의 UI password 로그인은 LiteLLM 내부에서 `TypeError: 'str' and 'NoneType'` 500 에러가 발생하는 알려진 버그가 있어 **사용하지 않는다**. 따라서 본 시스템은 **사용자가 UI에 로그인하지 않고 Virtual Key를 API/CLI로 사용**하는 모델로 운영한다.
+
+| 역할 | 인증 방법 | UI 접근 | API 접근 |
+|------|---------|--------|---------|
+| 관리자 | UI: `admin` + `LITELLM_MASTER_KEY` | ✓ Logs, Users, Models, Usage 모니터링 | ✓ Master Key로 모든 엔드포인트 |
+| 일반 사용자 | Virtual Key (24h TTL) | ✗ 불가 (PoC) | ✓ `/v1/chat/completions`, `/key/info` |
+
+**사용자 onboarding 흐름:**
+
+1. 관리자가 `./start.sh` 실행 → `scripts/sample-keys.txt`에 발급된 Virtual Key 10줄 생성
+2. 관리자가 각 사용자에게 다음을 안전한 채널(사내 메신저 다이렉트, 이메일)로 전달:
+   - 게이트웨이 URL (예: `https://192.168.1.50`)
+   - 본인 Virtual Key (예: `sk-vk-abc...`)
+   - 본인 슬롯 (예: `user01-gpt-4o`, `user01-o3-mini`)
+   - `client-tools/check-info.sh` 스크립트
+3. 사용자는 다음을 본인 PC에서 설정:
+   ```bash
+   export GATEWAY_URL="https://192.168.1.50"
+   export OPENAI_API_KEY="sk-vk-abc..."
+
+   # Codex CLI
+   mkdir -p ~/.codex
+   cat > ~/.codex/config.toml << 'TOML'
+   openai_base_url = "https://192.168.1.50/v1"
+   model = "user01-gpt-4o"
+   approval_mode = "suggest"
+   TOML
+
+   # 본인 사용량 확인
+   ./check-info.sh
+   ```
+4. 24h 후 Key 만료 → 관리자가 `./start.sh` 재실행하여 새 Key 발급, 사용자에게 재배포
+
+**일별 Key 회전 자동화 (관리자):**
+
+```bash
+# 매일 자정에 ./start.sh 재실행하여 새 24h Key 발급
+crontab -e
+# 추가:
+0 0 * * * cd /home/sung/Workspace/llm-access-gateway && ./start.sh >> /var/log/llm-gateway-rotate.log 2>&1
+```
+
+cron 실행 후 `scripts/sample-keys.txt`를 사용자별로 분리하여 자동 발송하는 스크립트는 향후 추가 가능 (사내 메신저 API 연동).
+
+**기존 PoC 샘플 사용자 제거** (실 인원으로 전환 시):
 
 ```bash
 MASTER_KEY=$(grep "^LITELLM_MASTER_KEY=" .env | cut -d= -f2-)

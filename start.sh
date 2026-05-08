@@ -268,6 +268,9 @@ phase_start_remaining() {
 phase_register_users() {
   bold "[Phase 6] Register sample users + issue Virtual Keys"
   bash "${BASE_DIR}/scripts/03-register-users.sh"
+
+  # 마이그레이션 — 이전 버전이 설정한 internal user password 잔여물 정리
+  bash "${BASE_DIR}/scripts/05-clear-user-passwords.sh" || true
 }
 
 # ════════════════════════════════════════════
