@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────
-# LiteLLM에 사용자 사전등록 + Virtual Key 발급 (멱등)
+# config/users.conf 기반 사용자 등록 + Virtual Key 발급
+# 멱등 동작:
+#   - 사용자가 없으면 /user/new 로 신규 생성
+#   - 있으면 /user/update 로 패스워드/모델 갱신
+#   - 매 실행마다 새 24h Virtual Key 발급 (구 키는 24h 후 자동 만료)
 # 결과: scripts/sample-keys.txt
 # ──────────────────────────────────────────────
 set -euo pipefail
@@ -9,34 +13,24 @@ set -euo pipefail
 : "${ENV_FILE:?ENV_FILE not set}"
 
 LITELLM_URL="${LITELLM_URL:-https://localhost}"
-CURL_OPTS="-sk"  # -k for self-signed cert
+CURL_OPTS="-sk"
 
-MASTER_KEY=$(grep "^LITELLM_MASTER_KEY=" "$ENV_FILE" | cut -d= -f2-)
+CONFIG_FILE="${BASE_DIR}/config/users.conf"
 SAMPLE_KEYS_FILE="${BASE_DIR}/scripts/sample-keys.txt"
 
 log() { echo "  [users] $*"; }
 
-# 매핑 테이블 (PoC 기본값)
-USERS=(
-  "alice@local user01 홍길동"
-  "bob@local user02 김철수"
-  "carol@local user03 이영희"
-  "dave@local user04 박민수"
-  "eve@local user05 최지은"
-  "frank@local user06 정서연"
-  "grace@local user07 강도현"
-  "henry@local user08 윤하은"
-  "ivy@local user09 장현우"
-  "jack@local user10 한소율"
-)
-ADMIN_EMAIL="admin@local"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "  [users] ERROR: ${CONFIG_FILE} not found." >&2
+  exit 1
+fi
 
-# JSON 파싱 유틸 (jq 없는 환경 대응)
-json_field() {
-  python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('$1', ''))" 2>/dev/null || echo ""
-}
+# shellcheck disable=SC1090
+source "$CONFIG_FILE"
 
-# ── /user/info 로 존재 확인 ──
+MASTER_KEY=$(grep "^LITELLM_MASTER_KEY=" "$ENV_FILE" | cut -d= -f2-)
+
+# ── 헬퍼: 사용자 존재 여부 ──
 user_exists() {
   local email="$1"
   local resp
@@ -53,32 +47,49 @@ except Exception:
 "
 }
 
-# ── 헤더 ──
+# ── sample-keys.txt 헤더 초기화 ──
 > "$SAMPLE_KEYS_FILE"
-echo "# Generated $(date -Iseconds) — DO NOT COMMIT" >> "$SAMPLE_KEYS_FILE"
-echo "# Format: <email> <slot> <virtual_key>" >> "$SAMPLE_KEYS_FILE"
-echo "" >> "$SAMPLE_KEYS_FILE"
+{
+  echo "# Generated $(date -Iseconds) — DO NOT COMMIT"
+  echo "# Format: <email> <slot> <virtual_key>"
+  echo ""
+} >> "$SAMPLE_KEYS_FILE"
 
-# ── Internal Users ──
-log "Registering 10 internal users..."
+# ── 일반 사용자 처리 ──
+log "Registering ${#USERS[@]} internal user(s) from config/users.conf..."
 for entry in "${USERS[@]}"; do
-  read -r EMAIL SLOT NAME <<< "$entry"
+  IFS='|' read -r SLOT EMAIL NAME PW KEY <<< "$entry"
+
+  if [[ ! "$SLOT" =~ ^user[0-9]{2}$ ]]; then
+    log "  ✗ Invalid SLOT '$SLOT', skipping"
+    continue
+  fi
+
+  PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({
+    'user_email': '${EMAIL}',
+    'user_role': 'internal_user',
+    'password': '${PW}',
+    'models': ['${SLOT}-gpt-4o', '${SLOT}-o3-mini'],
+    'max_budget': 50.0,
+    'budget_duration': '30d',
+    'metadata': {'slot': '${SLOT}', 'name': '${NAME}'}
+}, ensure_ascii=False))
+")
 
   if [[ "$(user_exists "$EMAIL")" == "NO" ]]; then
-    log "  + create ${EMAIL} → ${SLOT}"
+    log "  + create ${EMAIL} → ${SLOT} (pw: ${PW})"
     curl $CURL_OPTS -X POST "${LITELLM_URL}/user/new" \
       -H "Authorization: Bearer ${MASTER_KEY}" \
       -H "Content-Type: application/json" \
-      -d "{
-        \"user_email\": \"${EMAIL}\",
-        \"user_role\": \"internal_user\",
-        \"models\": [\"${SLOT}-gpt-4o\", \"${SLOT}-o3-mini\"],
-        \"max_budget\": 50.0,
-        \"budget_duration\": \"30d\",
-        \"metadata\": {\"slot\": \"${SLOT}\", \"name\": \"${NAME}\"}
-      }" >/dev/null
+      -d "$PAYLOAD" >/dev/null
   else
-    log "  · ${EMAIL} already exists"
+    log "  ↻ update ${EMAIL} → ${SLOT} (pw/모델 동기화)"
+    curl $CURL_OPTS -X POST "${LITELLM_URL}/user/update" \
+      -H "Authorization: Bearer ${MASTER_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD" >/dev/null || true
   fi
 
   # Virtual Key 발급 (24h)
@@ -89,7 +100,7 @@ for entry in "${USERS[@]}"; do
       \"user_id\": \"${EMAIL}\",
       \"models\": [\"${SLOT}-gpt-4o\", \"${SLOT}-o3-mini\"],
       \"duration\": \"24h\",
-      \"key_alias\": \"${SLOT}-codex-$(date +%Y%m%d)\",
+      \"key_alias\": \"${SLOT}-codex-$(date +%Y%m%d-%H%M%S)\",
       \"metadata\": {\"slot\": \"${SLOT}\", \"purpose\": \"codex-cli\"}
     }")
 
@@ -108,20 +119,34 @@ except Exception:
   fi
 done
 
-# ── Admin ──
-log "Registering admin user..."
+# ── 관리자 처리 ──
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-pw-change-me}"
+
+ADMIN_PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({
+    'user_email': '${ADMIN_EMAIL}',
+    'user_role': 'proxy_admin',
+    'password': '${ADMIN_PASSWORD}'
+}))
+")
+
 if [[ "$(user_exists "$ADMIN_EMAIL")" == "NO" ]]; then
+  log "Creating admin: ${ADMIN_EMAIL} (pw: ${ADMIN_PASSWORD})"
   curl $CURL_OPTS -X POST "${LITELLM_URL}/user/new" \
     -H "Authorization: Bearer ${MASTER_KEY}" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"user_email\": \"${ADMIN_EMAIL}\",
-      \"user_role\": \"proxy_admin\"
-    }" >/dev/null
-  log "  + ${ADMIN_EMAIL} (proxy_admin)"
+    -d "$ADMIN_PAYLOAD" >/dev/null
 else
-  log "  · ${ADMIN_EMAIL} already exists"
+  log "Updating admin: ${ADMIN_EMAIL} (pw 동기화)"
+  curl $CURL_OPTS -X POST "${LITELLM_URL}/user/update" \
+    -H "Authorization: Bearer ${MASTER_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$ADMIN_PAYLOAD" >/dev/null || true
 fi
 
-NUM_KEYS=$(grep -c '^[a-z]' "$SAMPLE_KEYS_FILE" || echo "0")
-log "✓ ${NUM_KEYS} virtual keys saved to ${SAMPLE_KEYS_FILE}"
+NUM_KEYS=$(grep -c '^[^#]' "$SAMPLE_KEYS_FILE" 2>/dev/null || echo "0")
+NUM_KEYS=$(echo "$NUM_KEYS" | tr -d '\n')
+log "✓ Registered ${#USERS[@]} user(s) + admin, issued $((NUM_KEYS - 1)) virtual key(s)"
+log "  Keys saved: ${SAMPLE_KEYS_FILE}"

@@ -96,6 +96,19 @@ open(p, 'w').write(s)
 
   # Make all scripts executable
   chmod +x "${BASE_DIR}/scripts/"*.sh "${BASE_DIR}/tests/"*.sh "${BASE_DIR}"/*.sh 2>/dev/null || true
+
+  # config/users.conf — 사용자/키 매핑 설정 파일
+  if [[ ! -f "${BASE_DIR}/config/users.conf" ]]; then
+    info "Creating config/users.conf from example (placeholder values)..."
+    mkdir -p "${BASE_DIR}/config"
+    cp "${BASE_DIR}/config/users.conf.example" "${BASE_DIR}/config/users.conf"
+    chmod 600 "${BASE_DIR}/config/users.conf"
+    warn "Edit config/users.conf with real OpenAI keys + passwords, then re-run ./start.sh"
+    warn "(현재는 placeholder 값으로 진행됩니다 — 실 OpenAI 호출은 401 반환)"
+  else
+    chmod 600 "${BASE_DIR}/config/users.conf"
+    ok "config/users.conf exists"
+  fi
 }
 
 # ════════════════════════════════════════════

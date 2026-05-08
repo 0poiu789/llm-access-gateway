@@ -1,4 +1,5 @@
 .env
+config/users.conf
 openbao/data/
 openbao/logs/
 openbao/init-keys.json

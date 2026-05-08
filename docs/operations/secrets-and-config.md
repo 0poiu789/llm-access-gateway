@@ -15,10 +15,13 @@
 
 ## 2. 비밀 파일 일람
 
-> **중요 — 키 흐름 구조**: LiteLLM OSS는 Hashicorp Vault 직접 연동을 지원하지 않으므로(Enterprise 전용), 본 시스템은 **OpenBao를 master, `.env`를 캐시**로 사용한다. `start.sh` Phase 4에서 `OpenBao → .env` 동기화가 매번 일어나며, LiteLLM은 컨테이너 OS env에서 키를 읽는다. 따라서 OpenBao의 키를 갱신해도 **반드시 sync + 컨테이너 재생성 절차를 거쳐야 LiteLLM에 반영된다** (§4.1 참조).
+> **단일 설정 파일 — `config/users.conf`** 가 OpenAI Key + 사용자 매핑(이메일/이름/패스워드/슬롯)의 **single source of truth**이다. 관리자는 이 파일만 편집하고 `./start.sh`를 실행하면 모든 변경사항이 OpenBao + .env + LiteLLM에 자동 동기화된다.
+>
+> **내부 흐름**: `config/users.conf` → OpenBao(시크릿 master) → `.env`(캐시) → LiteLLM 컨테이너 OS env. LiteLLM OSS는 vault 직접 연동을 지원하지 않으므로(Enterprise 전용) 이 다단 동기화 구조를 사용한다.
 
 | 경로 | 분류 | 생성 시점 | 사용자 작업 | 비고 |
 |------|------|----------|------------|------|
+| **`config/users.conf`** | **자동 (example 복사) + 편집** | `start.sh` Phase 1 | **OpenAI Key + 사용자 정보 입력** | **단일 설정 파일 — 이것만 편집** |
 | `.env` | 자동 + 수정 가능 | `start.sh` Phase 1 | 운영 시 일부 항목 교체 | 랜덤 Master Key/PG 비밀번호 자동 생성 |
 | `.env`의 `USER01..10_OPENAI_KEY` (10개) | **자동 동기화** | `start.sh` Phase 4 (OpenBao→`.env` mirror) | 직접 편집하지 말 것 (OpenBao에서 갱신) | LiteLLM 컨테이너에 env로 주입됨 |
 | `.env`의 `GENERIC_*` 변수 | 빈 값(자동) | `start.sh` Phase 1 | SSO 활성화 시 채움 | 본 문서 §4.2 참조 |
@@ -124,89 +127,76 @@ bob@local   user02 sk-vk-ghijkl...
 
 PoC 기본값으로 시작해도 동작은 하지만, **실제 사내 운영을 위해서는 다음 4가지를 교체해야 한다.**
 
-### 4.1 사내 OpenAI API Key 10개 적재 (필수)
+### 4.1 사내 OpenAI API Key 적재 + 사용자 매핑 — `config/users.conf` 한 곳에서 관리
 
-`./start.sh`는 `sk-proj-poc-userNN-placeholder-replace-with-real-key` 형태의 placeholder 키를 적재한다. 이 상태에서는 OpenAI API 호출이 401로 실패한다 (인증/라우팅 검증은 영향 없음).
+`./start.sh`는 최초 실행 시 `config/users.conf.example` → `config/users.conf` 를 자동 복사한다. **이 단일 파일에 OpenAI Key, 사용자 이메일, 패스워드, 슬롯 매핑을 모두 적는다.**
 
-> ⚠️ **3단계 모두 필요** — `bao kv put`만으로는 LiteLLM에 새 키가 반영되지 않는다. LiteLLM은 OpenBao를 직접 조회하지 않고 자신의 OS env (docker compose가 `.env`에서 주입)를 읽기 때문이다.
->
-> ```
-> [1] OpenBao 갱신 (bao kv put)
->          ↓
-> [2] OpenBao → .env 동기화 (scripts/02-load-secrets.sh)
->          ↓
-> [3] LiteLLM 컨테이너 재생성 (docker compose up -d --force-recreate litellm)
-> ```
-
-**교체 절차:**
+**파일 형식:**
 
 ```bash
-# 1. OpenBao Root Token 확보
+# config/users.conf
+ADMIN_EMAIL="admin@사내도메인.com"
+ADMIN_PASSWORD="admin-strong-password"
+
+USERS=(
+  # SLOT|EMAIL|이름|초기패스워드|OpenAI_API_KEY
+  "user01|alice@사내도메인.com|홍길동|alice-init-pw|sk-proj-실제alice의키"
+  "user02|bob@사내도메인.com|김철수|bob-init-pw|sk-proj-실제bob의키"
+  # ... 10명까지
+)
+```
+
+**적용 절차 (한 번에):**
+
+```bash
+cd ~/llm-gateway
+
+# 1. 설정 파일 편집
+$EDITOR config/users.conf
+#  ↑ ADMIN_*과 USERS 배열을 사내 실값으로 채움 (OpenAI Key 포함)
+
+# 2. start.sh 실행 — 모든 변경사항이 자동 적용됨
+./start.sh
+#  Phase 4: config의 OpenAI Key를 OpenBao + .env에 적재
+#  Phase 5: LiteLLM 컨테이너 자동 재생성 (새 env 읽음)
+#  Phase 6: 사용자 등록/업데이트 + 24h Virtual Key 발급
+#  Phase 7: 검증 테스트
+
+# 3. 검증
+VKEY=$(grep '^alice@사내도메인.com ' scripts/sample-keys.txt | awk '{print $3}')
+curl -sk -X POST https://<서버IP>/v1/chat/completions \
+  -H "Authorization: Bearer ${VKEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"user01-gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+#  → 200 + OpenAI 정상 응답이면 OK
+```
+
+`./start.sh`는 멱등이므로 키만 바꾸고 재실행해도, 사용자 이메일을 바꾸고 재실행해도 안전하다. 변경분만 자동 동기화된다.
+
+**파일 보안:**
+
+| 항목 | 권한 |
+|------|------|
+| `config/users.conf` | `chmod 600` (start.sh가 자동 적용) |
+| git 커밋 | `.gitignore`로 차단 |
+| 백업 | 안전한 비밀 관리 도구에 별도 저장 권장 |
+
+**고급: OpenBao를 직접 만지고 싶을 때 (선택)**
+
+`config/users.conf` 대신 OpenBao CLI로 키를 갱신할 수도 있다. 단 다음 `./start.sh` 실행 시 `config/users.conf` 값으로 덮어쓰므로 **두 곳을 일치시키거나 한 곳만 사용**해야 한다.
+
+```bash
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('openbao/init-keys.json'))['root_token'])")
-
-# 2. 사용자별 실제 키로 교체 (10명)
 docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao \
   bao kv put -address=http://127.0.0.1:8200 \
-  secret/litellm/USER01_OPENAI_KEY key="sk-proj-실제alice의키"
+  secret/litellm/USER01_OPENAI_KEY key="sk-proj-새키"
 
-docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao \
-  bao kv put -address=http://127.0.0.1:8200 \
-  secret/litellm/USER02_OPENAI_KEY key="sk-proj-실제bob의키"
-
-# ... user03 ~ user10도 동일하게
-
-# 3. OpenBao → .env 동기화 + LiteLLM 컨테이너 재생성 (둘 다 필수)
+# .env 동기화 + 컨테이너 재생성 (start.sh에 통합되어 있음)
 BASE_DIR=. ENV_FILE=./.env bash scripts/02-load-secrets.sh
 docker compose up -d --force-recreate litellm
-
-# (또는 한 번에) ./start.sh
-# start.sh가 멱등이므로 재실행해도 안전. Phase 4가 sync, Phase 5가 컨테이너 재시작.
-
-# 4. 검증
-curl -sk https://localhost/v1/chat/completions \
-  -H "Authorization: Bearer <alice의 Virtual Key>" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "user01-gpt-4o", "messages": [{"role":"user","content":"hello"}]}'
-# → OpenAI 정상 응답이어야 정상
 ```
 
-> 💡 **`restart` vs `up -d --force-recreate`**: `docker compose restart litellm`은 컨테이너 프로세스만 재시작할 뿐 env 변수를 다시 읽지 않는다. `.env`를 갱신했을 때는 반드시 `up -d --force-recreate`를 사용해야 새 값이 LiteLLM에 적용된다.
-
-**일괄 처리 스크립트 예시 (`scripts/load-real-keys.sh` — 직접 작성 필요):**
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${BASE_DIR}/.env"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${BASE_DIR}/openbao/init-keys.json'))['root_token'])")
-
-# 사내 환경에서만 사용. 절대 git에 커밋하지 말 것.
-declare -A REAL_KEYS=(
-  ["USER01_OPENAI_KEY"]="sk-proj-실제alice키"
-  ["USER02_OPENAI_KEY"]="sk-proj-실제bob키"
-  ["USER03_OPENAI_KEY"]="sk-proj-실제carol키"
-  # ... 10명
-)
-
-# Step 1: OpenBao에 적재
-for KEY_NAME in "${!REAL_KEYS[@]}"; do
-  docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao \
-    bao kv put -address=http://127.0.0.1:8200 \
-    "secret/litellm/${KEY_NAME}" \
-    key="${REAL_KEYS[$KEY_NAME]}" >/dev/null
-  echo "  ✓ OpenBao: ${KEY_NAME} updated"
-done
-
-# Step 2: OpenBao → .env 동기화
-BASE_DIR="${BASE_DIR}" ENV_FILE="${ENV_FILE}" bash "${BASE_DIR}/scripts/02-load-secrets.sh"
-
-# Step 3: LiteLLM 컨테이너 재생성 (env 재주입)
-cd "${BASE_DIR}" && docker compose up -d --force-recreate litellm
-echo "  ✓ LiteLLM recreated with new keys"
-```
-
-> ⚠️ 이 스크립트는 **실 키를 평문으로 포함**하므로 절대 git에 커밋하지 말 것. `.gitignore`에 `scripts/load-real-keys.sh` 추가 권장.
+> 💡 **`restart` vs `up -d --force-recreate`**: `docker compose restart litellm`은 컨테이너 프로세스만 재시작할 뿐 env 변수를 다시 읽지 않는다. `.env`를 갱신했을 때는 반드시 `up -d --force-recreate`를 사용해야 새 값이 LiteLLM에 적용된다 (`./start.sh`는 이를 자동 처리).
 
 ### 4.2 사내 IdP SSO 활성화 (선택, 운영 시 필수)
 
@@ -344,11 +334,12 @@ done
     □ cd llm-access-gateway
     □ docker info 정상 응답
 
-[2] 매핑 변경 (선택, 사용자 이름이 alice~jack이어도 무방)
-    □ scripts/03-register-users.sh 의 USERS 배열을 사내 실 인원 이메일로 수정
+[2] 사용자/Key 설정
+    □ ./start.sh 1회 실행 (config/users.conf 자동 생성됨)
+    □ config/users.conf 편집 — ADMIN, USERS 배열을 사내 실값으로 (OpenAI Key 포함)
 
-[3] 첫 부트스트랩
-    □ ./start.sh 실행
+[3] 부트스트랩 (전체 자동 적용)
+    □ ./start.sh 재실행
     □ Phase 7 검증 테스트 6개 모두 통과 확인
     □ scripts/sample-keys.txt 생성 확인
 
@@ -358,9 +349,8 @@ done
     □ 서버의 init-keys.json 권한 점검 (600)
 
 [5] 실 OpenAI API Key 적재 (§4.1)
-    □ 각 사용자별 실 키 10개를 OpenBao에 적재 (bao kv put)
-    □ OpenBao → .env 동기화 (bash scripts/02-load-secrets.sh)
-    □ LiteLLM 컨테이너 재생성 (docker compose up -d --force-recreate litellm)
+    □ config/users.conf 의 USERS 배열에 실 OpenAI Key 입력
+    □ ./start.sh 재실행 (자동 적용)
     □ 사용자 1명으로 실 API 호출 → OpenAI 정상 응답 확인
 
 [6] TLS 운영 인증서 교체 (§4.3)
