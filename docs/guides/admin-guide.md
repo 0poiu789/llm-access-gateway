@@ -336,3 +336,4 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 - [docs/design/D1-system-requirements.md](../design/D1-system-requirements.md) — v1 설계 (Virtual Key 단독)
 - [docs/design/D2-system-requirements.md](../design/D2-system-requirements.md) — v2 설계 (SSO 통합)
 - [docs/design/D3-implementation-plan.md](../design/D3-implementation-plan.md) — 본 PoC 구현 플랜
+- [docs/design/D4-reference-gap-analysis.md](../design/D4-reference-gap-analysis.md) — 참조 아키텍처 갭 분석 + WI-1~6 개선 설계

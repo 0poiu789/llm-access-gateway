@@ -160,4 +160,4 @@ codex
 
 - 운영: [docs/guides/admin-guide.md](docs/guides/admin-guide.md), [docs/operations/secrets-and-config.md](docs/operations/secrets-and-config.md)
 - 사용: [docs/guides/user-guide.md](docs/guides/user-guide.md), [client-tools/README.md](client-tools/README.md)
-- 설계: [D1](docs/design/D1-system-requirements.md) · [D2](docs/design/D2-system-requirements.md) · [D3](docs/design/D3-implementation-plan.md)
+- 설계: [D1](docs/design/D1-system-requirements.md) · [D2](docs/design/D2-system-requirements.md) · [D3](docs/design/D3-implementation-plan.md) · [D4 사례 갭 분석/개선 설계](docs/design/D4-reference-gap-analysis.md)
