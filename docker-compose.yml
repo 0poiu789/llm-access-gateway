@@ -61,24 +61,17 @@ services:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       PROXY_BASE_URL: "${PROXY_BASE_URL}"
 
-      # 사용자별 OpenAI Key — start.sh가 OpenBao에서 읽어 .env에 동기화한 값
-      USER01_OPENAI_KEY: "${USER01_OPENAI_KEY:-}"
-      USER02_OPENAI_KEY: "${USER02_OPENAI_KEY:-}"
-      USER03_OPENAI_KEY: "${USER03_OPENAI_KEY:-}"
-      USER04_OPENAI_KEY: "${USER04_OPENAI_KEY:-}"
-      USER05_OPENAI_KEY: "${USER05_OPENAI_KEY:-}"
-      USER06_OPENAI_KEY: "${USER06_OPENAI_KEY:-}"
-      USER07_OPENAI_KEY: "${USER07_OPENAI_KEY:-}"
-      USER08_OPENAI_KEY: "${USER08_OPENAI_KEY:-}"
-      USER09_OPENAI_KEY: "${USER09_OPENAI_KEY:-}"
-      USER10_OPENAI_KEY: "${USER10_OPENAI_KEY:-}"
-
       # ※ OIDC SSO 환경변수는 docker-compose.sso.yml에 분리되어 있다.
       # SSO 활성화 시에만 그 override 파일을 함께 사용한다.
       # 이유: LiteLLM OSS는 GENERIC_CLIENT_ID가 빈 값이어도 set되어 있기만 하면
       # Enterprise 라이선스를 요구하므로, 값이 없을 땐 변수 자체를 주입하지 않아야 한다.
 
       STORE_MODEL_IN_DB: "True"
+    # 사용자별 OpenAI Key는 secrets/litellm-secrets.env 에 별도 보관된다
+    # (02-load-secrets.sh가 OpenBao에서 AppRole로 read하여 chmod 600으로 렌더링).
+    # .env에는 더 이상 OpenAI Key가 없다.
+    env_file:
+      - ./secrets/litellm-secrets.env
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     command: --config /app/config.yaml --port 4000

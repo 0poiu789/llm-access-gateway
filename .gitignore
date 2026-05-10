@@ -7,5 +7,6 @@ postgres/
 nginx/certs/server.key
 nginx/certs/server.crt
 scripts/sample-keys.txt
+secrets/
 *.log
 .DS_Store

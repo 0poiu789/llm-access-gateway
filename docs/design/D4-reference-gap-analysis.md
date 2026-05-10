@@ -131,32 +131,24 @@
 
 ---
 
-#### ⑤ L 발급 시 IP 바인딩 — △ 부분 (LiteLLM은 지원, 적용 안 함)
+#### ⑤ L 발급 시 IP 바인딩 — △ 부분 (LiteLLM OSS 한계로 silent-drop)
 
 **사례**: `/key/generate` 호출 시 `allowed_ips` 필드에 사용자의 IP/CIDR 리스트를 넣어 도난 키 재사용을 차단.
 
-**현재**:
-- [scripts/03-register-users.sh:103-114](../../scripts/03-register-users.sh#L103-L114) — `/key/generate` 페이로드:
+**현재 PoC**:
+- 클라이언트 wiring(`scripts/03-register-users.sh`)은 4-field `users.conf`의 `ALLOWED_IPS`를 `/key/generate` 페이로드에 그대로 주입한다.
+- 그러나 **LiteLLM OSS 1.82.x의 `LiteLLM_VerificationToken` 테이블에는 `allowed_ips` 컬럼이 없고**, `/key/generate`는 이 파라미터를 200으로 받지만 silent-drop한다 (검증: `tests/07-test-ip-binding.sh`).
+- 즉 클라이언트 측은 *준비*되어 있으나, OSS 서버가 영속화/시행하지 않는다.
 
-  ```json
-  {
-    "user_id": "alice@local",
-    "models": ["user01-gpt-4o", "user01-o3-mini"],
-    "duration": "24h",
-    "key_alias": "user01-codex-…",
-    "metadata": {"slot": "user01", "purpose": "codex-cli"}
-  }
-  ```
+**갭의 영향**: Virtual Key가 사내 메신저/이메일 등에서 유출되면 24h TTL 만료까지 **어느 IP에서든 재사용 가능**.
 
-  **`allowed_ips` 누락**.
-- LiteLLM `/key/generate`는 `allowed_ips: ["10.0.0.0/8", "192.168.1.5"]` 형태를 정식 지원함 (LiteLLM API docs).
-- `config/users.conf`에도 사용자 IP 필드 없음.
+**해결 옵션**:
+- (a) LiteLLM Enterprise — per-key `allowed_ips`가 정식 지원될 가능성 (라이선스 필요)
+- (b) LiteLLM 업스트림 마이그레이션 추가 후 활성화 — 현재 wiring이 자동으로 효과 발휘
+- (c) **단기 우회**: nginx에서 사용자별 경로/Bearer-prefix → IP 매핑 검사. 복잡하므로 비권장
+- (d) **차선**: LiteLLM OSS의 글로벌 `general_settings.allowed_ip_addresses` (게이트웨이 진입 자체를 IP로 차단). 사용자별이 아니라 게이트웨이 전체 단위.
 
-**갭의 영향**: Virtual Key가 사내 메신저/이메일 등에서 유출될 경우 24h TTL 만료까지 **어느 IP에서든 재사용 가능**.
-
-**해결**: **WI-3 — Virtual Key IP 바인딩** 참조.
-
-**SSO 도입과 무관** — `/key/generate` API 파라미터 적용 문제.
+**SSO 도입과 무관** — 백엔드 영속화 한계.
 
 ---
 

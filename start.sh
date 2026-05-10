@@ -68,7 +68,22 @@ phase_bootstrap() {
     "${BASE_DIR}/nginx/certs" \
     "${BASE_DIR}/litellm" \
     "${BASE_DIR}/scripts" \
-    "${BASE_DIR}/tests"
+    "${BASE_DIR}/tests" \
+    "${BASE_DIR}/secrets"
+
+  # secrets/ 는 chmod 700 (런타임 시크릿 — AppRole 자격증명, OpenAI 키 렌더 파일)
+  chmod 700 "${BASE_DIR}/secrets" 2>/dev/null || true
+
+  # OpenBao 컨테이너는 uid 999로 동작하므로 호스트의 data/logs를 쓸 수 있어야 함.
+  # 기존 디렉토리가 호스트 사용자 소유로 만들어져 있으면 OpenBao가 init/audit 파일을 못 씀.
+  chmod 777 "${BASE_DIR}/openbao/data" 2>/dev/null || true
+  chmod 777 "${BASE_DIR}/openbao/logs" 2>/dev/null || true
+
+  # docker-compose의 env_file 검증을 위해 placeholder 생성 (02-load-secrets가 이후 갱신)
+  if [[ ! -f "${BASE_DIR}/secrets/litellm-secrets.env" ]]; then
+    touch "${BASE_DIR}/secrets/litellm-secrets.env"
+    chmod 600 "${BASE_DIR}/secrets/litellm-secrets.env"
+  fi
 
   # 호스트 IP 감지 (신규/기존 .env 모두에서 사용)
   local host_ip
@@ -268,9 +283,6 @@ phase_start_remaining() {
 phase_register_users() {
   bold "[Phase 6] Register sample users + issue Virtual Keys"
   bash "${BASE_DIR}/scripts/03-register-users.sh"
-
-  # 마이그레이션 — 이전 버전이 설정한 internal user password 잔여물 정리
-  bash "${BASE_DIR}/scripts/05-clear-user-passwords.sh" || true
 }
 
 # ════════════════════════════════════════════

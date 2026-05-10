@@ -12,15 +12,15 @@
 #
 #     ./scripts/set-openai-key.sh user01 sk-proj-실제-키
 #
-#   .env에는 start.sh가 OpenBao에서 자동 미러링하므로 직접 편집 금지.
-#   상세: docs/guides/admin-guide.md §4 (OpenAI Key 관리)
+#   secrets/litellm-secrets.env 는 start.sh가 OpenBao에서 AppRole로 자동 미러링.
+#   직접 편집 금지. 상세: docs/guides/admin-guide.md §4 (OpenAI Key 관리)
 #
-# 보안: 이 파일은 더 이상 OpenAI Key를 포함하지 않으므로 평문 노출 위험이
-#   메타데이터(이메일/이름)에 한정된다. 그래도 .gitignore + chmod 600은 유지된다.
+# 보안: 이 파일은 OpenAI Key를 포함하지 않는다. 평문 노출 위험은
+#   메타데이터(이메일/이름/허용 IP)에 한정. .gitignore + chmod 600 유지.
 #
 # 인증 모델:
 #   - 관리자: UI 로그인 시 admin@local + Master Key
-#   - 일반 사용자: 발급된 Virtual Key를 API/Codex CLI에 사용
+#   - 일반 사용자: 발급된 Virtual Key(L)를 API/Codex CLI에 사용
 #     (UI password 로그인은 LiteLLM OSS 버그로 비활성)
 # ══════════════════════════════════════════════════════════
 
@@ -29,10 +29,17 @@ ADMIN_EMAIL="admin@local"
 
 # ── 일반 사용자 (최대 10명, user01~user10 슬롯) ──
 #
-# 형식: "SLOT|EMAIL|NAME"
-#   - SLOT:  user01 ~ user10 (litellm/config.yaml의 model_name과 매칭)
-#   - EMAIL: 사용자 식별자 (메타데이터)
-#   - NAME:  표시용 (관리자 UI Logs 탭에 보임)
+# 형식: "SLOT|EMAIL|NAME[|ALLOWED_IPS]"
+#   - SLOT:        user01 ~ user10 (litellm/config.yaml의 model_name과 매칭)
+#   - EMAIL:       사용자 식별자 (메타데이터)
+#   - NAME:        표시용 (관리자 UI Logs 탭에 보임)
+#   - ALLOWED_IPS: 옵션. 콤마(,)로 구분된 IP 또는 CIDR. Virtual Key가 이 IP에서만
+#                  유효해진다 (도난 키 재사용 차단). 비우거나 4번째 필드 자체를
+#                  생략하면 IP 제한 없음(기존 동작).
+#                  예: "10.0.1.5,10.0.1.6"  또는  "10.0.0.0/8,192.168.0.0/16"
+#
+# 주의: nginx가 X-Forwarded-For/X-Real-IP를 LiteLLM에 전달하므로 사용자가
+#   사내 VPN/프록시를 통과하면 그 송출 IP를 등록해야 한다.
 
 USERS=(
   "user01|alice@local|홍길동"
