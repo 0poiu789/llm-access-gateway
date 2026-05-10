@@ -306,7 +306,7 @@ phase_summary() {
   echo "    ${BASE_DIR}/scripts/sample-keys.txt"
   echo ""
   echo "  Quick test (alice's key, alice = user01):"
-  echo "    VKEY=\$(grep '^alice@local ' scripts/sample-keys.txt | awk '{print \$3}')"
+  echo "    VKEY=\$(grep '^alice@local ' scripts/sample-keys.txt | awk '{print \$4}')"
   echo "    curl -sk https://localhost/v1/models -H \"Authorization: Bearer \$VKEY\" | python3 -m json.tool"
   echo ""
   echo "  Self-signed TLS — use 'curl -k' or accept browser warning"

@@ -7,19 +7,23 @@
 
 ## 1. 무엇을 어디에 작성하고 무엇을 실행하는가 (한눈에)
 
-| 단계 | 편집할 파일 | 실행할 명령 | 결과 |
-|------|------------|-------------|------|
-| **최초 설치** | (없음 — 자동) | `./start.sh` | `.env`, TLS 인증서, OpenBao, DB, 사용자 10명, Virtual Key 10개 자동 생성 |
-| **사용자 / OpenAI Key 편집** | `config/users.conf` | `./start.sh` (재실행) | OpenBao + `.env` + LiteLLM에 자동 동기화, 새 Virtual Key 재발급 |
-| **환경변수 미세조정** | `.env` | `docker compose restart litellm` | (PROXY_BASE_URL, SSO 설정 등 직접 수정 시) |
+| 단계 | 편집할 곳 | 실행할 명령 | 결과 |
+|------|----------|-------------|------|
+| **최초 설치** | (없음 — 자동) | `./start.sh` | `.env`, TLS 인증서, OpenBao, DB, 사용자 등록, Virtual Key 발급, 통합테스트까지 |
+| **OpenAI Key 적재 / 회전** | **OpenBao (직접)** | `./scripts/set-openai-key.sh user01 sk-proj-...` | OpenBao에 기록. `./start.sh` 재실행 시 `.env`로 자동 미러링 |
+| **사용자 메타데이터 편집** | `config/users.conf` (slot/email/name만) | `./start.sh` | LiteLLM 사용자 갱신 + 새 Virtual Key 재발급 |
+| **환경변수 미세조정** | `.env` (PROXY_BASE_URL 등) | `docker compose restart litellm` | (`USERnn_OPENAI_KEY` 줄은 직접 편집 금지 — OpenBao에서 갱신) |
 | **SSO 활성화** | `.env` (`GENERIC_*`) | `./start.sh` | `docker-compose.sso.yml` 자동 머지 |
-| **사용자에게 Key 배포** | (없음) | `cat scripts/sample-keys.txt` | 줄 단위로 복사하여 안전 채널로 사용자별 전달 |
-| **사용자 본인정보 조회 도구 배포** | (없음) | `client-tools/` 디렉토리 전달 | `check-info.sh` + 사용 안내 |
+| **사용자에게 Virtual Key 배포** | (없음) | `cat scripts/sample-keys.txt` | 줄 단위로 안전 채널 전달 |
+| **본인정보 조회 도구 배포** | (없음) | `client-tools/` 디렉토리 전달 | `check-info.sh` + README |
 | **일시 정지 (데이터 보존)** | (없음) | `./stop.sh` | 컨테이너 down. 다음 `./start.sh`로 복귀 |
-| **완전 초기화 (데이터 삭제)** | (없음) | `./reset.sh` | 모든 시크릿/DB/Key 삭제 — `yes` 확인 후 |
+| **완전 초기화 (데이터 삭제)** | (없음) | `./reset.sh` | 모든 시크릿/DB/Key 삭제 — `yes` 확인 |
 | **로그/요청기록 열람** | (없음) | `https://<host>/ui` Master Key 로그인 | UI Logs 탭 |
 
-> **핵심 원칙**: 관리자가 정상적으로 편집해야 하는 파일은 사실상 **`config/users.conf`** 하나다. 그 외는 `start.sh`가 멱등으로 처리한다.
+> **핵심 원칙**:
+> - **OpenAI Key의 source of truth = OpenBao**. 평문 파일에 두지 않는다 (관리자가 OpenAI 콘솔에서 발급 직후 `set-openai-key.sh`로 OpenBao에 직접 적재).
+> - **사용자 메타데이터의 source of truth = `config/users.conf`** (slot/email/name만, OpenAI Key 없음).
+> - 그 외는 `start.sh`가 멱등으로 처리.
 
 ---
 
@@ -52,7 +56,7 @@ cd llm-access-gateway
 | 1 | `.env`, TLS 자체서명 인증서, `config/users.conf` 자동 생성 (없을 때만) |
 | 2 | OpenBao 컨테이너 기동 |
 | 3 | OpenBao 초기화·Unseal·KV 마운트 (`openbao/init-keys.json` 생성) |
-| 4 | OpenAI Key 10개를 OpenBao에 적재 후 `.env`로 미러링 |
+| 4 | OpenBao→`.env` 미러링 (실 Key가 적재되어 있으면 그 값, 아니면 placeholder) |
 | 4b | PostgreSQL `pg_hba.conf` 정합성 보정 (멱등) |
 | 5 | PostgreSQL + LiteLLM + Nginx 기동 + readiness 대기 |
 | 6 | LiteLLM에 사용자 10명 + 관리자 등록, 24h Virtual Key 발급 → `scripts/sample-keys.txt` |
@@ -70,57 +74,127 @@ cd llm-access-gateway
 
 ---
 
-## 4. 사용자 / OpenAI Key 편집
+## 4. OpenAI Key 관리 (OpenBao 직접)
 
-**single source of truth = `config/users.conf`**.
-이 한 파일만 편집하고 `./start.sh`를 다시 실행하면 OpenBao, `.env`, LiteLLM 사용자 레코드, Virtual Key가 모두 동기화된다.
+OpenAI Key는 평문 파일에 두지 않는다. 관리자가 OpenAI 콘솔에서 Key를 발급한 직후 OpenBao에 직접 적재한다.
 
-### 4.1 파일 형식
+### 4.1 데이터 흐름
+
+```
+[OpenAI 콘솔 — IP/조직 정책 설정 후 Key 발급]
+              │
+              ▼   set-openai-key.sh (또는 bao kv put)
+[OpenBao   secret/litellm/USERnn_OPENAI_KEY]   ← single source of truth (저장 시 암호화)
+              │
+              ▼   start.sh / 02-load-secrets.sh
+[.env       USERnn_OPENAI_KEY=...]             ← 캐시 (chmod 600, 직접 편집 금지)
+              │
+              ▼   docker-compose env_file
+[LiteLLM 컨테이너 OS env]                       ← os.environ/USERnn_OPENAI_KEY 표기로 참조
+```
+
+> `.env` 단계가 남아있는 이유는 LiteLLM OSS가 Vault 직접 연동을 지원하지 않기 때문(Enterprise 전용). OpenBao를 거쳐 OS env로 우회 주입하는 우회 구조다. 관리자/사용자가 손으로 만지는 source는 **OpenBao 한 곳**으로 정리되어 있다.
+
+### 4.2 OpenAI 콘솔에서 해야 할 것 (권장)
+
+1. **사용자별로 별도의 API Key 발급** (slot 1:1, 사용자 단위 사용량 분리 가능)
+2. **IP 화이트리스트** — 게이트웨이(LiteLLM) 호스트의 outbound IP를 등록
+3. **사용량 한도 / 알림** — 사용자별 / 조직 차원
+4. Key 문자열은 콘솔 표시 직후가 마지막 노출 기회 — 즉시 OpenBao에 적재(아래 §4.3) 후 콘솔 창을 닫는다.
+
+### 4.3 OpenBao에 적재
+
+**(권장) 헬퍼 스크립트** — 인자로 직접:
+
+```bash
+./scripts/set-openai-key.sh user01 sk-proj-AAAA...
+```
+
+**(권장) 헬퍼 스크립트 — 셸 히스토리에 키를 남기지 않으려면 stdin**:
+
+```bash
+./scripts/set-openai-key.sh user01 -
+# 키 붙여넣기 후 Ctrl-D
+```
+
+**(직접) `bao` CLI**:
+
+```bash
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('openbao/init-keys.json'))['root_token'])")
+docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao \
+  bao kv put secret/litellm/USER01_OPENAI_KEY key="sk-proj-..."
+```
+
+**(GUI) OpenBao Web UI**:
+`http://<host>:8200` (PoC 기본 비공개) — Login: Token = `init-keys.json`의 `root_token` → KV `secret/litellm/USERnn_OPENAI_KEY`.
+
+### 4.4 적재 후 반영
+
+```bash
+./start.sh        # 멱등: OpenBao→.env 동기화 + LiteLLM 재기동 + Virtual Key 재발급
+```
+
+부분 갱신만 원하면:
+
+```bash
+./scripts/02-load-secrets.sh && docker compose restart litellm
+```
+
+### 4.5 Key 회전
+
+OpenAI 콘솔에서 새 Key 발급 → `set-openai-key.sh user01 sk-proj-NEW...` → `./start.sh`. 구 키는 OpenAI 콘솔에서 즉시 revoke한다.
+
+---
+
+## 5. 사용자 메타데이터 편집 (`config/users.conf`)
+
+**single source of truth = `config/users.conf`** (메타데이터만, OpenAI Key 없음).
+
+### 5.1 파일 형식
 
 ```bash
 # config/users.conf
-ADMIN_EMAIL="admin@local"
+ADMIN_EMAIL="admin@company.com"
 
 USERS=(
-  "user01|alice@company.com|홍길동|sk-proj-실제-키-..."
-  "user02|bob@company.com|김철수|sk-proj-실제-키-..."
+  "user01|alice@company.com|홍길동"
+  "user02|bob@company.com|김철수"
   # ...
 )
 ```
 
-각 항목 형식: `SLOT|EMAIL|NAME|OPENAI_API_KEY`
+각 항목 형식: `SLOT|EMAIL|NAME`
 
-- `SLOT` — `user01` ~ `user10` 중 하나. `litellm/config.yaml`의 `model_name`(`userNN-gpt-4o`, `userNN-o3-mini`)과 1:1 매핑된다.
-- `EMAIL` — 사용자 식별자(메타데이터). UI 로그인용 아님.
-- `NAME` — 표시 이름. 관리자 UI Logs 탭에서 보인다.
-- `OPENAI_API_KEY` — 해당 사용자가 사용할 실제 OpenAI Key. placeholder를 두면 OpenAI 호출은 401 반환(나머지 게이트웨이 동작은 정상).
+- `SLOT` — `user01` ~ `user10`. `litellm/config.yaml`의 `userNN-gpt-4o` / `userNN-o3-mini`와 1:1 매핑.
+- `EMAIL` — 사용자 식별자 메타데이터.
+- `NAME` — 표시 이름 (관리자 UI Logs 탭).
 
-### 4.2 편집 후 실행
+> 구 4-field 형식(`SLOT|EMAIL|NAME|KEY`)도 호환되지만 4번째 필드는 무시되고 경고가 출력된다. 마이그레이션 시 OpenBao로 옮기고 4번째 필드는 삭제할 것.
+
+### 5.2 편집 후 실행
 
 ```bash
 vi config/users.conf
 ./start.sh
 ```
 
-`./start.sh`가 자동으로 처리하는 것:
+`./start.sh`가 자동 처리:
 
-1. OpenBao의 `secret/litellm/USERnn_OPENAI_KEY` 시크릿 갱신
-2. `.env`에 `USER01_OPENAI_KEY` ~ `USER10_OPENAI_KEY` 미러링
-3. LiteLLM 컨테이너 재기동(env 반영)
-4. 사용자 신규/갱신 (`/user/new` 또는 `/user/update`)
-5. 새 24h Virtual Key 발급 → `scripts/sample-keys.txt` 재작성
+1. OpenBao→`.env` 미러링 (USER01..10_OPENAI_KEY)
+2. LiteLLM 컨테이너 재기동
+3. 사용자 신규/갱신 (`/user/new` 또는 `/user/update`)
+4. 새 24h Virtual Key 발급 → `scripts/sample-keys.txt`
 
-### 4.3 사용자 추가
+### 5.3 사용자 추가 / 제거
 
-`USERS=(...)` 배열에 새 줄을 추가하고 `./start.sh`. 단, `litellm/config.yaml`이 `user01`~`user10` 슬롯 20개를 사전 선언해 두었으므로 기본 한도는 10명. 그 이상이 필요하면 `litellm/config.yaml`에 모델 매핑을 추가한 후 `users.conf`에 슬롯 번호를 추가한다.
+- 추가: `USERS=(...)`에 새 줄 추가 → `./scripts/set-openai-key.sh userNN sk-proj-...` → `./start.sh`
+- 제거: 해당 줄 삭제 → `./start.sh`. LiteLLM 사용자 레코드는 즉시 정리하려면 UI Internal Users 탭에서 비활성화/삭제.
 
-### 4.4 사용자 제거
-
-해당 줄을 `users.conf`에서 삭제하고 `./start.sh`. LiteLLM 사용자 레코드는 남아있을 수 있으므로 즉시 정리하려면 UI Internal Users 탭에서 비활성화/삭제한다.
+> 슬롯 한도(기본 10)는 `litellm/config.yaml`이 user01~user10 모델 20개를 사전 선언해 둔 것에 의해 결정. 더 필요하면 `litellm/config.yaml`에 모델 매핑을 추가한 후 슬롯 번호를 늘린다.
 
 ---
 
-## 5. Virtual Key 배포
+## 6. Virtual Key 배포
 
 `./start.sh` 실행 직후 `scripts/sample-keys.txt`가 다시 쓰여진다.
 
@@ -144,7 +218,7 @@ bob@company.com   user02 김철수 sk-vk-efgh...
 
 ---
 
-## 6. 사용자에게 함께 전달할 도구
+## 7. 사용자에게 함께 전달할 도구
 
 `client-tools/` 디렉토리(2개 파일):
 
@@ -158,7 +232,7 @@ client-tools/
 
 ---
 
-## 7. 관리자 UI 사용 (모니터링)
+## 8. 관리자 UI 사용 (모니터링)
 
 `https://<host>/ui` 접속 → **Master Key**로 로그인.
 (Master Key는 `.env`의 `LITELLM_MASTER_KEY` 값. `./start.sh` 종료 시 화면에도 출력)
@@ -175,7 +249,7 @@ client-tools/
 
 ---
 
-## 8. SSO 활성화 (선택)
+## 9. SSO 활성화 (선택)
 
 사내 OIDC IdP를 연동하면 사용자도 UI 셀프서비스가 열린다.
 
@@ -196,7 +270,7 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 
 ---
 
-## 9. 일상 운영 명령
+## 10. 일상 운영 명령
 
 | 작업 | 명령 |
 |------|------|
@@ -211,7 +285,7 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 
 ---
 
-## 10. 백업 / 복구 핵심
+## 11. 백업 / 복구 핵심
 
 | 자산 | 위치 | 분실 시 |
 |------|------|---------|
@@ -225,9 +299,9 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 
 ---
 
-## 11. 실 운영 전 체크리스트
+## 12. 실 운영 전 체크리스트
 
-1. `config/users.conf`의 placeholder OpenAI Key를 실 키로 교체
+1. OpenAI 콘솔에서 사용자별 Key 발급(IP 화이트리스트 / 한도 설정) 후 `./scripts/set-openai-key.sh userNN sk-proj-...`로 OpenBao에 적재 (placeholder가 남지 않도록 10슬롯 모두)
 2. `openbao/init-keys.json`을 오프라인 백업 후 서버에서 삭제(또는 권한 강화)
 3. 자체서명 TLS → 사내 CA 또는 Let's Encrypt 교체
 4. 방화벽: 80, 443 외 차단 (4000 / 5432 / 8200은 호스트에 노출 안 됨)
@@ -239,7 +313,7 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 
 ---
 
-## 12. 트러블슈팅
+## 13. 트러블슈팅
 
 | 증상 | 원인 / 해결 |
 |------|------------|
@@ -248,14 +322,14 @@ ALLOWED_USER_EMAIL_DOMAINS=company.com
 | 테스트 04 (isolation) 실패 | `scripts/sample-keys.txt`가 비었는지 확인 — `register-users.sh` 재실행 |
 | 테스트 05 (vault) 실패 | OpenBao Sealed → `./openbao/unseal.sh` |
 | 사용자 401 (Codex) | Virtual Key 24h 만료. `./start.sh` 재실행 후 새 키 배포 |
-| OpenAI 401 | `config/users.conf`의 OpenAI Key가 placeholder/오타. 실제 키로 교체 후 `./start.sh` |
+| OpenAI 401 | OpenBao의 USERnn 슬롯이 placeholder 상태. `./scripts/set-openai-key.sh userNN sk-proj-...` 후 `./start.sh` |
 | `pg_hba.conf` 인증 오류 | `start.sh` Phase 4b가 자동 보정. 그래도 실패하면 `./reset.sh` 후 재설치 |
 | UI 로그인 후 즉시 500 | Internal User password 로그인 시도 — Master Key로만 로그인 |
 | 호스트 IP 변경 후 redirect 깨짐 | `.env`의 `PROXY_BASE_URL`을 새 IP로 수정 후 `docker compose restart litellm` |
 
 ---
 
-## 13. 관련 문서
+## 14. 관련 문서
 
 - [user-guide.md](user-guide.md) — 사용자 배포용 안내
 - [docs/operations/secrets-and-config.md](../operations/secrets-and-config.md) — 비밀 파일 상세

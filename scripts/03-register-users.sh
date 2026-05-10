@@ -3,7 +3,8 @@
 # config/users.conf 기반 사용자 등록 + Virtual Key 발급
 #
 # 흐름:
-#   1) config/users.conf의 USERS 배열을 읽음 (4-field 형식: SLOT|EMAIL|NAME|OPENAI_KEY)
+#   1) config/users.conf의 USERS 배열을 읽음 (3-field 형식: SLOT|EMAIL|NAME)
+#      OpenAI Key는 OpenBao에 별도 적재되어 있음 (./scripts/set-openai-key.sh)
 #   2) 각 사용자마다 LiteLLM /user/new (없으면) 또는 /user/update (있으면)
 #      ※ password 필드는 사용하지 않음 (LiteLLM OSS의 UI password 로그인 버그 회피).
 #         사용자는 UI에 로그인하지 않고 발급된 Virtual Key를 API/CLI에 사용한다.
@@ -64,11 +65,17 @@ except Exception:
 # ── 일반 사용자 처리 ──
 log "Registering ${#USERS[@]} internal user(s) from config/users.conf..."
 for entry in "${USERS[@]}"; do
-  IFS='|' read -r SLOT EMAIL NAME KEY <<< "$entry"
+  # 3-field: SLOT|EMAIL|NAME  (구 4-field 파일도 호환 — KEY 필드 무시)
+  IFS='|' read -r SLOT EMAIL NAME _LEGACY_KEY <<< "$entry"
 
   if [[ ! "$SLOT" =~ ^user[0-9]{2}$ ]]; then
     log "  ✗ Invalid SLOT '$SLOT', skipping"
     continue
+  fi
+
+  if [[ -n "${_LEGACY_KEY:-}" ]]; then
+    log "  ! '$EMAIL' 항목에 OpenAI Key가 포함되어 있습니다. 새 흐름에서는 무시됩니다."
+    log "    (이동 권장: ./scripts/set-openai-key.sh ${SLOT} <key>  + users.conf에서 4번째 필드 삭제)"
   fi
 
   # /user/new 또는 /user/update 페이로드 — password 필드는 의도적으로 제외

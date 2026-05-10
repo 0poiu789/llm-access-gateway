@@ -10,7 +10,7 @@ set -uo pipefail
 MASTER_KEY=$(grep "^LITELLM_MASTER_KEY=" "$ENV_FILE" | cut -d= -f2-)
 SAMPLE_KEYS_FILE="${BASE_DIR}/scripts/sample-keys.txt"
 
-USER01_KEY=$(grep "^alice@local " "$SAMPLE_KEYS_FILE" 2>/dev/null | awk '{print $3}' | head -1)
+USER01_KEY=$(grep "^alice@local " "$SAMPLE_KEYS_FILE" 2>/dev/null | awk '{print $4}' | head -1)
 PASS=true
 
 # 1) Master Key로 /user/list (관리자 전용) → 200

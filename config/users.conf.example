@@ -1,23 +1,27 @@
 # ══════════════════════════════════════════════════════════
-# LLM Access Gateway — 사용자 매핑 및 OpenAI Key 설정
+# LLM Access Gateway — 사용자 매핑 설정 (메타데이터 only)
 # ══════════════════════════════════════════════════════════
 #
 # 사용법:
 #   1) cp config/users.conf.example config/users.conf
-#   2) 아래 ADMIN_EMAIL 과 USERS 항목을 사내 실값으로 편집
-#   3) ./start.sh 실행 (기존 설치에서도 동일, 변경분만 적용됨)
+#   2) ADMIN_EMAIL / USERS 항목을 사내 실값으로 편집
+#   3) ./start.sh 실행
 #
-# 보안: config/users.conf 는 OpenAI Key를 평문으로 포함한다.
-#   - .gitignore에 의해 git 커밋 자동 차단
-#   - chmod 600으로 권한 제한 (start.sh가 자동 적용)
+# ★ OpenAI Key는 이 파일에 두지 않는다.
+#   OpenAI 콘솔에서 Key를 발급받은 직후, 다음 한 줄로 OpenBao에 직접 적재한다:
+#
+#     ./scripts/set-openai-key.sh user01 sk-proj-실제-키
+#
+#   .env에는 start.sh가 OpenBao에서 자동 미러링하므로 직접 편집 금지.
+#   상세: docs/guides/admin-guide.md §4 (OpenAI Key 관리)
+#
+# 보안: 이 파일은 더 이상 OpenAI Key를 포함하지 않으므로 평문 노출 위험이
+#   메타데이터(이메일/이름)에 한정된다. 그래도 .gitignore + chmod 600은 유지된다.
 #
 # 인증 모델:
-#   - LiteLLM Admin UI 접근은 Master Key 로그인(관리자 전용).
-#     Internal User의 UI password 로그인은 LiteLLM OSS의 알려진 버그로
-#     500 에러가 발생하므로 사용하지 않는다.
-#   - 일반 사용자는 발급된 Virtual Key를 API/Codex CLI에 사용.
-#     (정보 조회/사용량은 client-tools/check-info.sh 참고)
-#
+#   - 관리자: UI 로그인 시 admin@local + Master Key
+#   - 일반 사용자: 발급된 Virtual Key를 API/Codex CLI에 사용
+#     (UI password 로그인은 LiteLLM OSS 버그로 비활성)
 # ══════════════════════════════════════════════════════════
 
 # ── 관리자 (UI 로그인 시 admin / Master Key 사용) ──
@@ -25,22 +29,20 @@ ADMIN_EMAIL="admin@local"
 
 # ── 일반 사용자 (최대 10명, user01~user10 슬롯) ──
 #
-# 형식: "SLOT|EMAIL|NAME|OPENAI_API_KEY"
-#   - SLOT: user01 ~ user10 중 하나 (litellm/config.yaml의 model_name과 매칭)
-#   - EMAIL: 사용자 식별자 (UI 로그인용 아님; 메타데이터)
-#   - NAME: 표시용 (관리자 UI Logs 탭에 보임)
-#   - OPENAI_API_KEY: 해당 사용자가 사용할 실제 OpenAI Key
-#                      placeholder를 그대로 두면 OpenAI 호출 시 401 (다른 검증은 정상)
+# 형식: "SLOT|EMAIL|NAME"
+#   - SLOT:  user01 ~ user10 (litellm/config.yaml의 model_name과 매칭)
+#   - EMAIL: 사용자 식별자 (메타데이터)
+#   - NAME:  표시용 (관리자 UI Logs 탭에 보임)
 
 USERS=(
-  "user01|alice@local|홍길동|sk-proj-poc-user01-placeholder-replace-with-real-key"
-  "user02|bob@local|김철수|sk-proj-poc-user02-placeholder-replace-with-real-key"
-  "user03|carol@local|이영희|sk-proj-poc-user03-placeholder-replace-with-real-key"
-  "user04|dave@local|박민수|sk-proj-poc-user04-placeholder-replace-with-real-key"
-  "user05|eve@local|최지은|sk-proj-poc-user05-placeholder-replace-with-real-key"
-  "user06|frank@local|정서연|sk-proj-poc-user06-placeholder-replace-with-real-key"
-  "user07|grace@local|강도현|sk-proj-poc-user07-placeholder-replace-with-real-key"
-  "user08|henry@local|윤하은|sk-proj-poc-user08-placeholder-replace-with-real-key"
-  "user09|ivy@local|장현우|sk-proj-poc-user09-placeholder-replace-with-real-key"
-  "user10|jack@local|한소율|sk-proj-poc-user10-placeholder-replace-with-real-key"
+  "user01|alice@local|홍길동"
+  "user02|bob@local|김철수"
+  "user03|carol@local|이영희"
+  "user04|dave@local|박민수"
+  "user05|eve@local|최지은"
+  "user06|frank@local|정서연"
+  "user07|grace@local|강도현"
+  "user08|henry@local|윤하은"
+  "user09|ivy@local|장현우"
+  "user10|jack@local|한소율"
 )
