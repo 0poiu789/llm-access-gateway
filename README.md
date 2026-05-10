@@ -2,68 +2,102 @@
 
 OpenBao + LiteLLM Proxy 기반 사용자별 OpenAI Key 격리 LLM 게이트웨이 (PoC).
 
-## 빠른 시작
+> 역할별 상세 안내
+> - 🛠 **관리자** — 설치 / Key 발급 / 모니터링: [docs/guides/admin-guide.md](docs/guides/admin-guide.md)
+> - 👤 **일반 사용자** — Codex CLI / API 사용: [docs/guides/user-guide.md](docs/guides/user-guide.md)
+
+---
+
+## 빠른 시작 (관리자, 1줄)
 
 ```bash
 ./start.sh
 ```
 
-이 한 줄로 다음이 자동 수행된다:
+이 한 줄로 자동 수행:
+`.env`/TLS/OpenBao 초기화 → 서비스 4개(OpenBao·PG·LiteLLM·Nginx) 기동 → 사용자 10명 등록 → 24h Virtual Key 10개 발급 → 6개 통합 테스트 → 요약 출력.
 
-1. `.env` 자동 생성 (랜덤 Master Key, PG 비밀번호)
-2. 자체서명 TLS 인증서 발급
-3. Docker Compose로 4개 서비스 기동 (OpenBao, PostgreSQL, LiteLLM, Nginx)
-4. OpenBao 초기화 + Unseal + KV 활성화
-5. 사용자 OpenAI Key 10개 적재 (placeholder)
-6. LiteLLM에 사용자 10명 + 관리자 1명 사전등록
-7. 각 사용자별 24h TTL Virtual Key 발급
-8. 6개 통합 검증 테스트 실행
-9. 결과 요약 출력 (UI URL, Master Key, Virtual Key 위치)
+완료 후 출력되는 것:
+- **Admin UI**: `https://<host>/ui` (Master Key로 로그인)
+- **API base**: `https://<host>/v1`
+- **Master Key**: `.env`의 `LITELLM_MASTER_KEY`
+- **Virtual Key 10개**: [scripts/sample-keys.txt](scripts/sample-keys.txt) — 각 줄을 해당 사용자에게 안전 채널로 전달
 
-## 사전 요구사항
+### 사전 요구사항
 
-- Docker 데몬 실행 중 (`docker info` 성공해야 함)
-- `docker compose` v2
-- `curl`, `openssl`, `python3` (시스템 기본 제공)
+`docker info` 가 성공해야 한다. 그 외 `docker compose` v2, `curl`, `openssl`, `python3`. WSL2는 Docker Desktop의 WSL Integration 활성화 필요.
 
-WSL2에서 Docker Desktop을 사용하려면 Docker Desktop 설정 → Resources → WSL Integration에서 해당 배포판을 활성화하라. 데몬이 없으면 `start.sh`의 Phase 0에서 명확한 에러로 중단된다.
+### 사용자 / OpenAI Key 편집
+
+[config/users.conf](config/users.conf.example)만 편집하고 `./start.sh` 재실행. OpenBao + `.env` + LiteLLM + Virtual Key가 자동 동기화된다.
+
+```bash
+# config/users.conf
+USERS=(
+  "user01|alice@company.com|홍길동|sk-proj-실제-키-..."
+  "user02|bob@company.com|김철수|sk-proj-실제-키-..."
+  ...
+)
+```
+
+---
+
+## 빠른 시작 (사용자, 3단계)
+
+관리자에게 받은 것: **게이트웨이 주소**, **Virtual Key**(`sk-vk-...`), **본인 슬롯**(`userNN`).
+
+```bash
+# 1) 환경변수
+export GATEWAY_URL="https://<관리자에게_받은_주소>"
+export OPENAI_API_KEY="sk-vk-..."
+
+# 2) 본인 정보 확인 (관리자가 함께 전달한 client-tools/)
+./client-tools/check-info.sh
+
+# 3) Codex CLI 설정
+mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML
+openai_base_url = "${GATEWAY_URL}/v1"
+model = "user01-gpt-4o"   # 본인 슬롯 번호로 교체
+approval_mode = "suggest"
+TOML
+
+codex
+```
+
+24시간 후 Key가 만료되면 관리자에게 새 키를 요청한다.
+자세한 설명·OpenAI SDK 예시·FAQ → [user-guide.md](docs/guides/user-guide.md).
+
+---
 
 ## 디렉토리 구조
 
 ```
 .
-├── docs/design/
-│   ├── D1-system-requirements.md     # v1 설계 (Virtual Key 단독 인증)
-│   ├── D2-system-requirements.md     # v2 설계 (SSO 통합)
-│   └── D3-implementation-plan.md     # 본 PoC 구현 플랜
-├── docker-compose.yml
-├── .env.example                      # 템플릿
-├── start.sh                          # 단일 진입점
-├── stop.sh                           # 정지 (데이터 보존)
-├── reset.sh                          # 초기화 (데이터 삭제)
-├── nginx/
-│   ├── nginx.conf                    # TLS 단일 진입점, RBAC는 LiteLLM이 담당
-│   └── certs/                        # 자체서명 인증서 (자동 생성)
-├── openbao/
-│   ├── config/openbao.hcl
-│   └── unseal.sh                     # 재기동 시 unseal
-├── litellm/
-│   └── config.yaml                   # 모델 매핑 + 24h TTL + Vault 연동
-├── scripts/
-│   ├── 01-init-openbao.sh            # OpenBao 초기화 (멱등)
-│   ├── 02-load-secrets.sh            # 사용자 OpenAI Key 적재
-│   ├── 03-register-users.sh          # 사용자 사전등록 + Virtual Key 발급
-│   ├── 04-health-check.sh            # LiteLLM readiness 대기
-│   └── sample-keys.txt               # 발급된 Virtual Key (자동 생성)
-└── tests/
-    ├── test-all.sh                   # 전체 테스트 러너
-    ├── 01-test-health.sh             # /health, HTTPS, redirect
-    ├── 02-test-models.sh             # 20개 모델 노출
-    ├── 03-test-key-generation.sh     # Virtual Key + 24h TTL
-    ├── 04-test-isolation.sh          # 사용자 간 모델 격리
-    ├── 05-test-vault-integration.sh  # OpenBao ↔ LiteLLM
-    └── 06-test-rbac.sh               # Master vs Internal User 권한
+├── start.sh / stop.sh / reset.sh    # 단일 진입점 / 정지(보존) / 초기화(삭제)
+├── docker-compose.yml               # OpenBao + PG + LiteLLM + Nginx
+├── docker-compose.sso.yml           # SSO 활성화 시 자동 머지
+├── .env / .env.example              # 자동 생성, chmod 600
+├── config/users.conf                # ★ 관리자가 편집하는 single source of truth
+├── client-tools/                    # 사용자에게 배포할 도구 (check-info.sh + README)
+├── nginx/                           # TLS 단일 진입점 (자체서명 자동 생성)
+├── openbao/                         # 시크릿 저장소 (init-keys.json은 오프라인 백업 필수)
+├── litellm/config.yaml              # 모델 매핑 (user01~10 × gpt-4o/o3-mini = 20개)
+├── scripts/                         # 01-init / 02-load-secrets / 03-register-users / 04-health
+│   └── sample-keys.txt              # 발급된 Virtual Key (자동 생성, gitignore)
+├── tests/                           # 6개 통합 테스트 + test-all.sh
+└── docs/
+    ├── guides/
+    │   ├── admin-guide.md           # 관리자 운영 안내
+    │   └── user-guide.md            # 사용자 사용 안내
+    ├── operations/
+    │   └── secrets-and-config.md    # 비밀 파일 / 백업 상세
+    └── design/
+        ├── D1-system-requirements.md   # v1 설계 (Virtual Key 단독)
+        ├── D2-system-requirements.md   # v2 설계 (SSO 통합)
+        └── D3-implementation-plan.md   # PoC 구현 플랜
 ```
+
+---
 
 ## 아키텍처 요약
 
@@ -76,77 +110,40 @@ WSL2에서 Docker Desktop을 사용하려면 Docker Desktop 설정 → Resources
                                        Users/Keys/Logs         User OpenAI Keys
 ```
 
-## 사용자 시나리오
+- 인증: Virtual Key(`sk-vk-…`, 24h TTL) → LiteLLM이 슬롯에 매핑된 OpenAI Key로 치환 후 OpenAI 호출
+- 사용자 간 격리: `userNN-gpt-4o` 모델은 `userNN`만 호출 가능 (RBAC + 모델 화이트리스트)
+- 관리자 UI: Master Key 단독 로그인, 전체 prompt/spend Logs 열람 (90d 보존)
 
-### 일반 사용자
-1. 브라우저로 `https://localhost/ui` 접속
-2. (PoC) Master Key로 로그인 — 본인의 Virtual Key 조회/Regenerate
-3. Codex CLI에 Virtual Key 입력하여 사용
-4. 24시간 후 만료 → UI 재방문하여 새 Key 발급
+---
 
-### 관리자
-1. `https://localhost/ui`에 Master Key로 로그인
-2. Logs 탭에서 전체 사용자 요청/응답 열람
-3. Internal Users 탭에서 사용자 관리
+## 자주 쓰는 명령
 
-### Codex CLI 설정 예시
+| 작업 | 명령 |
+|------|------|
+| 정지 (데이터 보존) | `./stop.sh` |
+| 완전 초기화 | `./reset.sh` |
+| 로그 보기 | `docker compose logs -f litellm` |
+| 새 Virtual Key 일괄 재발급 | `./start.sh` (멱등 — 매일 1회 권장) |
+| 통합 테스트만 재실행 | `./tests/test-all.sh` |
 
-```bash
-# ~/.codex/config.toml
-openai_base_url = "https://localhost/v1"
-model = "user01-gpt-4o"
-approval_mode = "suggest"
+---
 
-# 환경변수
-export OPENAI_API_KEY="sk-vk-..."  # scripts/sample-keys.txt에서 복사
-```
+## 트러블슈팅 (요약)
 
-## SSO 활성화 (선택)
-
-`.env`의 다음 항목을 사내 IdP 값으로 채우고 `docker compose restart litellm`:
-
-```
-GENERIC_CLIENT_ID=...
-GENERIC_CLIENT_SECRET=...
-GENERIC_AUTHORIZATION_ENDPOINT=...
-GENERIC_TOKEN_ENDPOINT=...
-GENERIC_USERINFO_ENDPOINT=...
-ALLOWED_USER_EMAIL_DOMAINS=company.com
-```
-
-자세한 IdP 설정은 [D2-system-requirements.md §9](docs/design/D2-system-requirements.md) 참조.
-
-## 실 운영 전 필수 변경
-
-1. **Placeholder OpenAI Key를 실 키로 교체**:
-   ```bash
-   ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('openbao/init-keys.json'))['root_token'])")
-   docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao \
-     bao kv put secret/litellm/USER01_OPENAI_KEY key="sk-proj-real-key"
-   docker compose restart litellm
-   ```
-
-2. **`init-keys.json` 오프라인 백업 후 서버에서 삭제** (분실 시 복구 불가)
-
-3. **자체서명 TLS → 사내 CA 또는 Let's Encrypt로 교체**
-
-4. **방화벽에서 80, 443 외 포트 차단** (4000, 5432, 8200은 외부 노출 안 됨)
-
-자세한 보안 체크리스트는 [D2 §20](docs/design/D2-system-requirements.md#20-보안-체크리스트) 참조.
-
-## 트러블슈팅
-
-| 증상 | 원인 / 해결 |
-|------|------------|
+| 증상 | 해결 |
+|------|------|
 | `Docker daemon is not running` | `sudo service docker start` 또는 Docker Desktop 시작 |
-| `Phase 5b` LiteLLM ready 시간 초과 | `docker compose logs litellm` 로 원인 분석. PostgreSQL 마이그레이션이 처음엔 30~60초 걸릴 수 있음 |
-| 테스트 04 (isolation) 실패 | `register-users.sh`가 정상 실행되었는지 `scripts/sample-keys.txt` 확인 |
-| 테스트 05 (vault) 실패 | OpenBao Sealed 상태일 수 있음 → `./openbao/unseal.sh` |
-| Codex CLI 401 | Virtual Key 만료 (24h) — UI 재방문하여 Regenerate |
+| Phase 5b LiteLLM ready 시간 초과 | `docker compose logs litellm` (첫 실행은 30~60초 소요) |
+| 사용자 401 | Virtual Key 24h 만료 — `./start.sh` 재실행 후 새 키 배포 |
+| OpenAI 401 | `config/users.conf`가 placeholder 상태 — 실 키로 교체 후 `./start.sh` |
+| OpenBao Sealed | `./openbao/unseal.sh` |
 
-## 참고
+전체 표 → [admin-guide.md §12](docs/guides/admin-guide.md).
 
-- [D1 — v1 설계](docs/design/D1-system-requirements.md): Virtual Key 단독 인증 모델
-- [D2 — v2 설계](docs/design/D2-system-requirements.md): SSO 통합 모델 (PoC 기반)
-- [D3 — 구현 플랜](docs/design/D3-implementation-plan.md): 본 PoC 구현 계획
-- [비밀 파일 및 환경 설정 가이드](docs/operations/secrets-and-config.md): 사내 환경 배포 시 어떤 비밀 파일을 어떻게 만들고 채워야 하는지
+---
+
+## 참고 문서
+
+- 운영: [docs/guides/admin-guide.md](docs/guides/admin-guide.md), [docs/operations/secrets-and-config.md](docs/operations/secrets-and-config.md)
+- 사용: [docs/guides/user-guide.md](docs/guides/user-guide.md), [client-tools/README.md](client-tools/README.md)
+- 설계: [D1](docs/design/D1-system-requirements.md) · [D2](docs/design/D2-system-requirements.md) · [D3](docs/design/D3-implementation-plan.md)

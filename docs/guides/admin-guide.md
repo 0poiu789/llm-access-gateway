@@ -1,0 +1,264 @@
+# 관리자 가이드
+
+게이트웨이를 호스팅하는 **관리자** 대상 운영 안내서.
+일반 사용자용 안내는 [user-guide.md](user-guide.md)에 있다.
+
+---
+
+## 1. 무엇을 어디에 작성하고 무엇을 실행하는가 (한눈에)
+
+| 단계 | 편집할 파일 | 실행할 명령 | 결과 |
+|------|------------|-------------|------|
+| **최초 설치** | (없음 — 자동) | `./start.sh` | `.env`, TLS 인증서, OpenBao, DB, 사용자 10명, Virtual Key 10개 자동 생성 |
+| **사용자 / OpenAI Key 편집** | `config/users.conf` | `./start.sh` (재실행) | OpenBao + `.env` + LiteLLM에 자동 동기화, 새 Virtual Key 재발급 |
+| **환경변수 미세조정** | `.env` | `docker compose restart litellm` | (PROXY_BASE_URL, SSO 설정 등 직접 수정 시) |
+| **SSO 활성화** | `.env` (`GENERIC_*`) | `./start.sh` | `docker-compose.sso.yml` 자동 머지 |
+| **사용자에게 Key 배포** | (없음) | `cat scripts/sample-keys.txt` | 줄 단위로 복사하여 안전 채널로 사용자별 전달 |
+| **사용자 본인정보 조회 도구 배포** | (없음) | `client-tools/` 디렉토리 전달 | `check-info.sh` + 사용 안내 |
+| **일시 정지 (데이터 보존)** | (없음) | `./stop.sh` | 컨테이너 down. 다음 `./start.sh`로 복귀 |
+| **완전 초기화 (데이터 삭제)** | (없음) | `./reset.sh` | 모든 시크릿/DB/Key 삭제 — `yes` 확인 후 |
+| **로그/요청기록 열람** | (없음) | `https://<host>/ui` Master Key 로그인 | UI Logs 탭 |
+
+> **핵심 원칙**: 관리자가 정상적으로 편집해야 하는 파일은 사실상 **`config/users.conf`** 하나다. 그 외는 `start.sh`가 멱등으로 처리한다.
+
+---
+
+## 2. 사전 요구사항
+
+| 항목 | 확인 명령 |
+|------|----------|
+| Docker 데몬 실행 | `docker info` |
+| Docker Compose v2 | `docker compose version` |
+| `curl`, `openssl`, `python3` | (기본 설치) |
+| 호스트 포트 80/443 사용 가능 | `ss -ltnp \| grep -E ':(80\|443)\b'` |
+
+WSL2에서 Docker Desktop을 쓰려면 Docker Desktop → Settings → Resources → WSL Integration에서 해당 배포판을 켜야 한다.
+
+---
+
+## 3. 최초 설치
+
+```bash
+git clone <저장소> llm-access-gateway
+cd llm-access-gateway
+./start.sh
+```
+
+`start.sh`가 멱등으로 다음 8단계를 수행한다.
+
+| Phase | 내용 |
+|-------|------|
+| 0 | docker / curl / openssl / python3 / Docker daemon 점검 |
+| 1 | `.env`, TLS 자체서명 인증서, `config/users.conf` 자동 생성 (없을 때만) |
+| 2 | OpenBao 컨테이너 기동 |
+| 3 | OpenBao 초기화·Unseal·KV 마운트 (`openbao/init-keys.json` 생성) |
+| 4 | OpenAI Key 10개를 OpenBao에 적재 후 `.env`로 미러링 |
+| 4b | PostgreSQL `pg_hba.conf` 정합성 보정 (멱등) |
+| 5 | PostgreSQL + LiteLLM + Nginx 기동 + readiness 대기 |
+| 6 | LiteLLM에 사용자 10명 + 관리자 등록, 24h Virtual Key 발급 → `scripts/sample-keys.txt` |
+| 7 | 6개 통합 검증 테스트 (health / models / key / isolation / vault / RBAC) |
+| 8 | 요약 출력 — UI URL, Master Key, sample-keys.txt 위치 |
+
+완료 시점에 화면에 다음이 표시된다.
+
+```
+  Admin UI:    https://<host>/ui   (use Master Key to log in)
+  API base:    https://<host>/v1
+  Master Key:  sk-master-........
+  10 sample Virtual Keys saved to: .../scripts/sample-keys.txt
+```
+
+---
+
+## 4. 사용자 / OpenAI Key 편집
+
+**single source of truth = `config/users.conf`**.
+이 한 파일만 편집하고 `./start.sh`를 다시 실행하면 OpenBao, `.env`, LiteLLM 사용자 레코드, Virtual Key가 모두 동기화된다.
+
+### 4.1 파일 형식
+
+```bash
+# config/users.conf
+ADMIN_EMAIL="admin@local"
+
+USERS=(
+  "user01|alice@company.com|홍길동|sk-proj-실제-키-..."
+  "user02|bob@company.com|김철수|sk-proj-실제-키-..."
+  # ...
+)
+```
+
+각 항목 형식: `SLOT|EMAIL|NAME|OPENAI_API_KEY`
+
+- `SLOT` — `user01` ~ `user10` 중 하나. `litellm/config.yaml`의 `model_name`(`userNN-gpt-4o`, `userNN-o3-mini`)과 1:1 매핑된다.
+- `EMAIL` — 사용자 식별자(메타데이터). UI 로그인용 아님.
+- `NAME` — 표시 이름. 관리자 UI Logs 탭에서 보인다.
+- `OPENAI_API_KEY` — 해당 사용자가 사용할 실제 OpenAI Key. placeholder를 두면 OpenAI 호출은 401 반환(나머지 게이트웨이 동작은 정상).
+
+### 4.2 편집 후 실행
+
+```bash
+vi config/users.conf
+./start.sh
+```
+
+`./start.sh`가 자동으로 처리하는 것:
+
+1. OpenBao의 `secret/litellm/USERnn_OPENAI_KEY` 시크릿 갱신
+2. `.env`에 `USER01_OPENAI_KEY` ~ `USER10_OPENAI_KEY` 미러링
+3. LiteLLM 컨테이너 재기동(env 반영)
+4. 사용자 신규/갱신 (`/user/new` 또는 `/user/update`)
+5. 새 24h Virtual Key 발급 → `scripts/sample-keys.txt` 재작성
+
+### 4.3 사용자 추가
+
+`USERS=(...)` 배열에 새 줄을 추가하고 `./start.sh`. 단, `litellm/config.yaml`이 `user01`~`user10` 슬롯 20개를 사전 선언해 두었으므로 기본 한도는 10명. 그 이상이 필요하면 `litellm/config.yaml`에 모델 매핑을 추가한 후 `users.conf`에 슬롯 번호를 추가한다.
+
+### 4.4 사용자 제거
+
+해당 줄을 `users.conf`에서 삭제하고 `./start.sh`. LiteLLM 사용자 레코드는 남아있을 수 있으므로 즉시 정리하려면 UI Internal Users 탭에서 비활성화/삭제한다.
+
+---
+
+## 5. Virtual Key 배포
+
+`./start.sh` 실행 직후 `scripts/sample-keys.txt`가 다시 쓰여진다.
+
+```bash
+cat scripts/sample-keys.txt
+```
+
+```
+# Generated 2026-05-10T14:50:03+00:00 — DO NOT COMMIT
+# Format: <email> <slot> <name> <virtual_key>
+
+alice@company.com user01 홍길동 sk-vk-abcd...
+bob@company.com   user02 김철수 sk-vk-efgh...
+...
+```
+
+각 줄을 해당 사용자에게 **안전한 채널**(사내 메신저 다이렉트, 회사 메일)로 전달.
+사용자 측 사용법은 [user-guide.md](user-guide.md) 참조.
+
+> Virtual Key는 24h 후 자동 만료된다. 매일 또는 사용자 요청 시 `./start.sh` 재실행 → 새 키 배포가 운영 사이클이다.
+
+---
+
+## 6. 사용자에게 함께 전달할 도구
+
+`client-tools/` 디렉토리(2개 파일):
+
+```
+client-tools/
+├── README.md         # 사용자가 본인 PC에서 보는 짧은 안내
+└── check-info.sh     # 본인 사용량 / 잔여 예산 / 만료 시각 조회
+```
+
+가장 단순한 배포: `client-tools/`를 zip/scp로 전달하면서 본인의 Virtual Key 한 줄을 같이 알려준다.
+
+---
+
+## 7. 관리자 UI 사용 (모니터링)
+
+`https://<host>/ui` 접속 → **Master Key**로 로그인.
+(Master Key는 `.env`의 `LITELLM_MASTER_KEY` 값. `./start.sh` 종료 시 화면에도 출력)
+
+| 탭 | 용도 |
+|----|-----|
+| **Logs** | 전체 사용자의 prompt/response/spend 시계열 (90d 보존) |
+| **Internal Users** | 사용자 목록, 모델 매핑, 한도 |
+| **Virtual Keys** | 발급된 Key 목록, 만료 시각, alias |
+| **Models** | 매핑된 20개 (10 사용자 × 2 모델) |
+| **Settings** | budget / TTL / SSO 등 |
+
+> Internal User의 **password 로그인**은 LiteLLM OSS의 알려진 버그(500)로 사용하지 않는다. 사용자는 UI 로그인 없이 Virtual Key API/CLI로만 사용한다.
+
+---
+
+## 8. SSO 활성화 (선택)
+
+사내 OIDC IdP를 연동하면 사용자도 UI 셀프서비스가 열린다.
+
+`.env` 편집:
+
+```bash
+GENERIC_CLIENT_ID=<IdP에서 발급받은 client id>
+GENERIC_CLIENT_SECRET=<client secret>
+GENERIC_AUTHORIZATION_ENDPOINT=https://idp.사내/oauth2/authorize
+GENERIC_TOKEN_ENDPOINT=https://idp.사내/oauth2/token
+GENERIC_USERINFO_ENDPOINT=https://idp.사내/oauth2/userinfo
+ALLOWED_USER_EMAIL_DOMAINS=company.com
+```
+
+후 `./start.sh`. `GENERIC_CLIENT_ID`가 채워져 있으면 `start.sh`가 자동으로 `docker-compose.sso.yml`을 머지한다.
+
+자세한 IdP 설정 표는 [D2-system-requirements.md §9](../design/D2-system-requirements.md) 참조.
+
+---
+
+## 9. 일상 운영 명령
+
+| 작업 | 명령 |
+|------|------|
+| 전체 상태 | `docker compose ps` |
+| LiteLLM 로그 (실시간) | `docker compose logs -f litellm` |
+| OpenBao 상태 | `docker exec openbao bao status` |
+| OpenBao Unseal (재기동 후) | `./openbao/unseal.sh` |
+| 정지 (데이터 보존) | `./stop.sh` |
+| 완전 초기화 | `./reset.sh` |
+| 통합 테스트만 재실행 | `./tests/test-all.sh` |
+| OpenAI Key 직접 갱신 (vault) | `docker exec -e BAO_TOKEN=$ROOT_TOKEN openbao bao kv put secret/litellm/USER01_OPENAI_KEY key="sk-proj-..."` 후 `./start.sh` |
+
+---
+
+## 10. 백업 / 복구 핵심
+
+| 자산 | 위치 | 분실 시 |
+|------|------|---------|
+| **OpenBao Unseal Keys + Root Token** | `openbao/init-keys.json` | **복구 불가** — 오프라인 백업 필수 |
+| 시크릿 데이터 | Docker volume `openbao-data` | 위 키가 있어야 복원 가능 |
+| 사용자/Key/Spend 로그 | Docker volume `postgres-data` | 사용자 다시 등록 필요 |
+| TLS 인증서 | `nginx/certs/server.{crt,key}` | 재발급 가능 |
+| 사용자 매핑 | `config/users.conf` | git에 없음 — 별도 백업 |
+
+상세 절차: [docs/operations/secrets-and-config.md](../operations/secrets-and-config.md).
+
+---
+
+## 11. 실 운영 전 체크리스트
+
+1. `config/users.conf`의 placeholder OpenAI Key를 실 키로 교체
+2. `openbao/init-keys.json`을 오프라인 백업 후 서버에서 삭제(또는 권한 강화)
+3. 자체서명 TLS → 사내 CA 또는 Let's Encrypt 교체
+4. 방화벽: 80, 443 외 차단 (4000 / 5432 / 8200은 호스트에 노출 안 됨)
+5. `LITELLM_MASTER_KEY`를 사내 비밀 관리 도구로 이관, 정기 로테이션
+6. PostgreSQL volume 정기 백업 정책 수립
+7. (선택) SSO 활성화 후 사용자 자율 가입/로그인 흐름 검증
+
+자세한 표: [D2-system-requirements.md §20](../design/D2-system-requirements.md).
+
+---
+
+## 12. 트러블슈팅
+
+| 증상 | 원인 / 해결 |
+|------|------------|
+| `Docker daemon is not running` | `sudo service docker start` 또는 Docker Desktop 시작 |
+| Phase 5b LiteLLM ready 시간 초과 | `docker compose logs litellm`. 첫 실행은 PG 마이그레이션으로 30~60초 소요 |
+| 테스트 04 (isolation) 실패 | `scripts/sample-keys.txt`가 비었는지 확인 — `register-users.sh` 재실행 |
+| 테스트 05 (vault) 실패 | OpenBao Sealed → `./openbao/unseal.sh` |
+| 사용자 401 (Codex) | Virtual Key 24h 만료. `./start.sh` 재실행 후 새 키 배포 |
+| OpenAI 401 | `config/users.conf`의 OpenAI Key가 placeholder/오타. 실제 키로 교체 후 `./start.sh` |
+| `pg_hba.conf` 인증 오류 | `start.sh` Phase 4b가 자동 보정. 그래도 실패하면 `./reset.sh` 후 재설치 |
+| UI 로그인 후 즉시 500 | Internal User password 로그인 시도 — Master Key로만 로그인 |
+| 호스트 IP 변경 후 redirect 깨짐 | `.env`의 `PROXY_BASE_URL`을 새 IP로 수정 후 `docker compose restart litellm` |
+
+---
+
+## 13. 관련 문서
+
+- [user-guide.md](user-guide.md) — 사용자 배포용 안내
+- [docs/operations/secrets-and-config.md](../operations/secrets-and-config.md) — 비밀 파일 상세
+- [docs/design/D1-system-requirements.md](../design/D1-system-requirements.md) — v1 설계 (Virtual Key 단독)
+- [docs/design/D2-system-requirements.md](../design/D2-system-requirements.md) — v2 설계 (SSO 통합)
+- [docs/design/D3-implementation-plan.md](../design/D3-implementation-plan.md) — 본 PoC 구현 플랜
