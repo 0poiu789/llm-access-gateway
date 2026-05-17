@@ -153,15 +153,26 @@ LLM Access Gateway의 Nginx는 기본적으로 다음 경로의 인증서 파일
 호스트 repository 기준 실제 파일 경로:
 
 ```text
-nginx/certs/server.crt
-nginx/certs/server.key
+nginx/certs/server.crt   ← 사내 CA 발급 cert을 이 자리에 둔다
+nginx/certs/server.key   ← 대응 개인키
 ```
+
+> **로컬 dev 산출물과의 분리**
+> 본 리포지토리는 로컬 개발용 cert을 `nginx/certs/dev/` 서브디렉토리에 격리한다. 운영 cert이 들어갈 자리는 항상 `nginx/certs/server.crt` 와 `server.key` (서브디렉토리 아님).
+>
+> `./start.sh`가 dev 모드일 때는 다음과 같이 만든다:
+> ```
+> nginx/certs/server.crt → symlink → dev/server.crt
+> nginx/certs/server.key → symlink → dev/server.key
+> nginx/certs/dev/...    (로컬 CA + leaf + CSR + cnf)
+> ```
+> 운영 cert으로 교체하면 이 symlink들이 실제 파일로 대체된다.
 
 따라서 사내 CA에서 발급받은 파일을 다음과 같이 배치한다.
 
 ```text
-사내 CA 발급 fullchain 인증서 → nginx/certs/server.crt
-개인키 파일                  → nginx/certs/server.key
+사내 CA 발급 fullchain 인증서 → nginx/certs/server.crt   (일반 파일)
+개인키 파일                  → nginx/certs/server.key   (일반 파일, chmod 600)
 ```
 
 ---
@@ -174,11 +185,21 @@ Gateway 서버에서 다음을 수행한다.
 cd ~/llm-access-gateway
 ```
 
-기존 개발용 자체서명 인증서를 백업한다.
+기존 cert(dev symlink 또는 이전 운영 cert) 을 백업한다 — 타임스탬프를 한 번만 계산해 mkdir/cp 사이의 race 를 회피.
 
 ```bash
-mkdir -p nginx/certs/backup-$(date +%Y%m%d-%H%M%S)
-cp nginx/certs/server.crt nginx/certs/server.key nginx/certs/backup-$(date +%Y%m%d-%H%M%S)/
+BACKUP="nginx/certs/backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP"
+# symlink면 -L 로 따라가 실제 내용을 복사
+cp -L nginx/certs/server.crt nginx/certs/server.key "$BACKUP/" 2>/dev/null || true
+ls -la "$BACKUP"
+```
+
+dev 모드 symlink 가 있다면 먼저 제거 (없으면 무시):
+
+```bash
+[[ -L nginx/certs/server.crt ]] && rm nginx/certs/server.crt
+[[ -L nginx/certs/server.key ]] && rm nginx/certs/server.key
 ```
 
 사내에서 받은 인증서를 설치한다.
@@ -187,14 +208,14 @@ fullchain 인증서를 받은 경우:
 
 ```bash
 cp /path/to/llm-gateway-fullchain.crt nginx/certs/server.crt
-cp /path/to/llm-gateway.key nginx/certs/server.key
+cp /path/to/llm-gateway.key           nginx/certs/server.key
 ```
 
 서버 인증서와 CA chain을 따로 받은 경우:
 
 ```bash
 cat /path/to/llm-gateway.crt /path/to/ca-chain.crt > nginx/certs/server.crt
-cp /path/to/llm-gateway.key nginx/certs/server.key
+cp  /path/to/llm-gateway.key                         nginx/certs/server.key
 ```
 
 파일 권한을 정리한다.
@@ -203,6 +224,14 @@ cp /path/to/llm-gateway.key nginx/certs/server.key
 chmod 644 nginx/certs/server.crt
 chmod 600 nginx/certs/server.key
 ```
+
+(선택) 로컬 dev 산출물을 정리하고 싶으면:
+
+```bash
+rm -rf nginx/certs/dev/
+```
+
+> dev/ 를 지우지 않아도 nginx는 일반 파일로 바뀐 `server.crt`/`server.key`만 보므로 영향 없음. `./start.sh` 재실행 시 `is_production_cert`가 issuer 를 확인해 자동으로 운영 cert을 보존한다(dev/ 를 재생성하지도 않음).
 
 Nginx 컨테이너를 재시작한다.
 
@@ -383,8 +412,10 @@ Codex CLI 사용자가 https://llm-gateway.<사내도메인>/v1 로 LiteLLM Prox
 2. 해당 DNS가 Gateway 서버 IP인 11.11.111.111을 가리키게 한다.
 3. 사내 CA에서 llm-gateway.<사내도메인>용 서버 인증서를 발급받는다.
 4. 인증서 SAN에는 DNS:llm-gateway.<사내도메인>이 포함되어야 한다.
-5. 발급받은 fullchain 인증서와 개인키를 nginx/certs/server.crt, server.key로 설치한다.
-6. Nginx를 재시작한다.
+5. (dev symlink 제거 후) 발급받은 fullchain과 개인키를
+   nginx/certs/server.crt, nginx/certs/server.key 에 일반 파일로 설치한다.
+   dev 산출물은 nginx/certs/dev/ 에 따로 격리되어 있어 운영 파일과 헷갈리지 않는다.
+6. Nginx를 재시작한다 (docker compose restart nginx).
 7. Codex는 openai_base_url = "https://llm-gateway.<사내도메인>/v1" 로 접속한다.
 8. 사용자는 실제 OpenAI API Key가 아니라 LiteLLM Virtual Key를 사용한다.
 ```

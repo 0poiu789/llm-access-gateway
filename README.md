@@ -98,6 +98,7 @@ codex
 │   └── litellm-secrets.env          #   USER01..10_OPENAI_KEY (OpenBao→AppRole로 자동 렌더)
 ├── client-tools/                    # 사용자에게 배포할 도구 (check-info.sh + README)
 ├── nginx/                           # TLS + X-Forwarded-For 전달
+│   └── certs/                       # 운영: server.{crt,key} 일반 파일 / 개발: dev/ + symlink
 ├── openbao/                         # 시크릿 저장소 (init-keys.json은 오프라인 백업 필수)
 │   └── logs/audit.log               # 모든 KV read/write 감사 로그
 ├── litellm/config.yaml              # 모델 매핑 (user01~10 × gpt-4o/o3-mini = 20개)

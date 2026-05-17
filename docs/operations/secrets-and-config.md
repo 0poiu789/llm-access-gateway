@@ -33,8 +33,9 @@
 | `.env`의 `GENERIC_*` 변수 | 빈 값(자동) | `start.sh` Phase 1 | SSO 활성화 시 채움 | 본 문서 §4.2 참조 |
 | **`secrets/openbao-approle.env`** | **AppRole 자격증명** (자동) | `start.sh` Phase 3 | (미작업; 무효화 시 `rm` 후 `start.sh`) | role-id + secret-id. chmod 600 |
 | **`secrets/litellm-secrets.env`** | **OpenAI Key 캐시** (자동 렌더) | `start.sh` Phase 4 | **직접 편집 금지 — OpenBao에서 갱신** | AppRole로 자동 미러. chmod 600 |
-| `nginx/certs/server.crt` | 자동 + 교체 권장 | `start.sh` Phase 1 | PoC 그대로, 운영 시 사내 CA로 교체 | 자체서명 1년 유효 |
-| `nginx/certs/server.key` | 자동 | `start.sh` Phase 1 | 위와 동일 | chmod 600 |
+| `nginx/certs/server.crt` | 자동 (dev 모드: dev/server.crt 로의 symlink) | `start.sh` Phase 1 | 운영 시 사내 CA 발급 cert으로 일반 파일 교체 | codex(rustls) 호환을 위해 CA 서명된 leaf |
+| `nginx/certs/server.key` | 자동 (dev 모드: dev/server.key 로의 symlink) | `start.sh` Phase 1 | 위와 동일 | chmod 600 |
+| `nginx/certs/dev/` | 자동 (로컬 dev 산출물 전용) | `start.sh` Phase 1 | 미작업 (운영 cert과 분리되어 격리됨) | Local Root CA, leaf, CSR, config |
 | `openbao/init-keys.json` | 자동 | `start.sh` Phase 3 | **오프라인 백업 후 서버에서 삭제 필수** | Unseal 키 5개 + Root Token. 분실 시 OpenBao 복구 불가 |
 | `openbao/data/` | 자동 | OpenBao 컨테이너 | 백업 권장 | 시크릿 영속 저장소 (master) |
 | `openbao/logs/audit.log` | 자동 (Phase 3 활성화) | OpenBao 컨테이너 | 보존 정책 수립 (회전 / SIEM 연동) | 모든 KV read/write JSON 라인 — HMAC된 토큰 accessor만 |
@@ -72,18 +73,26 @@ POSTGRES_PASSWORD=<openssl rand -hex 16의 결과>
 
 `USER01_OPENAI_KEY` ~ `USER10_OPENAI_KEY` 10개를 담는 별도 env 파일. `./start.sh` 실행마다 02-load-secrets.sh가 AppRole로 OpenBao를 read하여 갱신한다. docker-compose의 `env_file` 디렉티브가 이 파일을 LiteLLM 컨테이너의 OS env로 주입하며, LiteLLM의 `api_key: "os.environ/USERnn_OPENAI_KEY"` 표기가 이를 읽는다. **이 파일은 직접 편집하지 말고 OpenBao에서 갱신할 것** (§4.1 참조). chmod 600, gitignore.
 
-### 3.2 `nginx/certs/server.{crt,key}`
+### 3.2 `nginx/certs/server.{crt,key}` + `nginx/certs/dev/`
 
-`./start.sh`가 다음 명령으로 자체서명 인증서를 발급한다 (1년 유효).
+`./start.sh` Phase 1의 `ensure_dev_tls_cert` 함수가 두 단계로 동작한다:
 
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout nginx/certs/server.key \
-  -out nginx/certs/server.crt \
-  -subj "/C=KR/ST=Seoul/L=Seoul/O=PoC/CN=llm-gateway.local"
+1. **Local Dev Root CA + 그 CA로 서명된 leaf** 를 `nginx/certs/dev/` 에 생성. leaf는 `CA:FALSE`, SAN=`DNS:localhost,IP:127.0.0.1`, EKU=`serverAuth` 로 codex(rustls) 호환.
+2. `nginx/certs/server.{crt,key}` 를 `dev/server.{crt,key}` 로의 **relative symlink** 로 노출. Nginx는 항상 `nginx/certs/server.{crt,key}` 에서 cert을 로딩하므로 운영 cert 교체 시에도 위치는 동일.
+
+레이아웃:
+```
+nginx/certs/
+├── server.crt          → symlink → dev/server.crt   (dev 모드)  /  운영 cert (사내 CA)
+├── server.key          → symlink → dev/server.key   (dev 모드)  /  운영 key
+└── dev/                ← 로컬 dev 산출물 전용 (gitignored)
+    ├── local-root-ca.{crt,key,srl}     ← .crt를 OS trust store에 등록
+    └── server.{crt,key,csr}, server-*.cnf
 ```
 
-브라우저/CLI에서 인증서 경고가 나오므로 `curl -k` 또는 브라우저 예외 추가 필요. **운영 환경에서는 §4.3에 따라 사내 CA 또는 Let's Encrypt 인증서로 교체할 것.**
+`is_production_cert` 가 `server.crt` 의 symlink 여부 + issuer 로 dev/운영을 자동 판별. 운영 cert이 일반 파일로 놓여 있으면 dev 재생성을 건너뛴다.
+
+브라우저/CLI에서 인증서 경고가 나오면 `dev/local-root-ca.crt` 를 OS trust store에 등록 (`./start.sh` 가 `AUTO_INSTALL_DEV_CA=true` 기본으로 자동 시도). 자세한 절차/대안 OS는 [`docs/local-dev-codex-tls.md`](../local-dev-codex-tls.md). **운영 환경에서는 §4.3에 따라 사내 CA 또는 Let's Encrypt 인증서로 교체**.
 
 ### 3.3 `openbao/init-keys.json`
 
@@ -280,17 +289,29 @@ docker compose up -d --force-recreate litellm
 
 ### 4.3 운영용 TLS 인증서 적용 (운영 시 필수)
 
-자체서명 인증서는 브라우저 경고가 나오고 보안적으로도 약함. 운영 환경에서는 다음 중 하나로 교체:
+`./start.sh`의 기본 dev 모드는 Local Dev Root CA + 그 CA로 서명한 leaf 를 만들지만, 운영 환경에서는 사내 CA 발급 cert으로 교체.
 
 **옵션 A — 사내 CA 발급 인증서:**
 
 ```bash
-# 사내 CA가 발급한 인증서로 교체
+# 1) dev 모드 symlink 제거 (있으면)
+[[ -L nginx/certs/server.crt ]] && rm nginx/certs/server.crt
+[[ -L nginx/certs/server.key ]] && rm nginx/certs/server.key
+
+# 2) 사내 CA가 발급한 인증서를 일반 파일로 배치
 cp /path/to/사내CA발급/server.crt nginx/certs/server.crt
 cp /path/to/사내CA발급/server.key nginx/certs/server.key
+chmod 644 nginx/certs/server.crt
 chmod 600 nginx/certs/server.key
+
+# 3) (선택) 로컬 dev 산출물 정리 — 안 지워도 nginx가 참조하지 않음
+# rm -rf nginx/certs/dev/
+
+# 4) Nginx 재시작
 docker compose restart nginx
 ```
+
+이후 `./start.sh` 를 재실행해도 `is_production_cert` 가 issuer 를 보고 자동 보존(덮어쓰지 않음). 자세한 절차는 [`docs/guides/internal-ca-certificate-guide.md`](../guides/internal-ca-certificate-guide.md).
 
 **옵션 B — Let's Encrypt (외부 도메인 노출 가능 시):**
 

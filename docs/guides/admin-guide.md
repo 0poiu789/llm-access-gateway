@@ -344,7 +344,8 @@ docker exec -e BAO_TOKEN="$ROOT_TOKEN" openbao bao policy read litellm-readonly
 | 시크릿 데이터 | Docker volume / `openbao/data/` | 위 키가 있어야 복원 가능 |
 | AppRole 자격증명 | `secrets/openbao-approle.env` | 재발급 가능 (`./start.sh` 멱등) |
 | 사용자/Key/Spend 로그 | Docker volume `postgres-data` | 사용자 다시 등록 필요 |
-| TLS 인증서 | `nginx/certs/server.{crt,key}` | 재발급 가능 |
+| TLS 인증서 (운영) | `nginx/certs/server.{crt,key}` (일반 파일 — 사내 CA 발급) | 재발급 가능 |
+| TLS 인증서 (개발) | `nginx/certs/dev/` 전체 + `server.{crt,key}` 가 dev/ 로의 symlink | `./start.sh` 가 자동 재생성 (멱등) |
 | 사용자 매핑 | `config/users.conf` | git에 없음 — 별도 백업 |
 | Audit log | `openbao/logs/audit.log` | 보존 정책 별도 수립 (회전, 외부 SIEM 연동 등) |
 

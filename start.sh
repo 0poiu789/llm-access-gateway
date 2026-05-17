@@ -49,32 +49,56 @@ LOCAL_CA_SUBJECT="/C=KR/O=PoC/CN=Local Dev Root CA"
 DEV_CERT_REGENERATED=false
 
 _cert_paths() {
-  CA_KEY="${BASE_DIR}/nginx/certs/local-root-ca.key"
-  CA_CRT="${BASE_DIR}/nginx/certs/local-root-ca.crt"
-  SRV_KEY="${BASE_DIR}/nginx/certs/server.key"
-  SRV_CRT="${BASE_DIR}/nginx/certs/server.crt"
-  SRV_CSR="${BASE_DIR}/nginx/certs/server.csr"
-  SRV_CNF="${BASE_DIR}/nginx/certs/server-openssl.cnf"
-  SRV_EXT="${BASE_DIR}/nginx/certs/server-ext.cnf"
-  CA_SERIAL="${BASE_DIR}/nginx/certs/local-root-ca.srl"
+  # Nginx가 실제로 로딩하는 경로 (운영 cert이 그대로 놓이는 자리; dev 모드에서는 dev/* 로의 symlink)
+  CERTS_DIR="${BASE_DIR}/nginx/certs"
+  NGINX_SRV_CRT="${CERTS_DIR}/server.crt"
+  NGINX_SRV_KEY="${CERTS_DIR}/server.key"
+
+  # 로컬 dev 산출물 — 운영 cert과 헷갈리지 않도록 별도 subdir로 격리
+  DEV_DIR="${CERTS_DIR}/dev"
+  CA_KEY="${DEV_DIR}/local-root-ca.key"
+  CA_CRT="${DEV_DIR}/local-root-ca.crt"
+  CA_SERIAL="${DEV_DIR}/local-root-ca.srl"
+  SRV_KEY="${DEV_DIR}/server.key"
+  SRV_CRT="${DEV_DIR}/server.crt"
+  SRV_CSR="${DEV_DIR}/server.csr"
+  SRV_CNF="${DEV_DIR}/server-openssl.cnf"
+  SRV_EXT="${DEV_DIR}/server-ext.cnf"
 }
 
-# 외부(사내 CA 등) 인증서가 배치된 상태인지 — issuer가 우리가 발급한 Local Dev Root CA가 아니면 production으로 간주
+# 외부(사내 CA 등) 인증서가 배치된 상태인지 판정.
+# 운영용 cert 신호: nginx/certs/server.crt 가 **일반 파일** (symlink 아님) 이고
+# 그 cert의 issuer가 "Local Dev Root CA" 가 아닐 때.
+# (dev 모드에서는 server.crt 가 dev/server.crt 로의 symlink — 명확한 시각적 구분)
 is_production_cert() {
   _cert_paths
-  [[ -f "$SRV_CRT" ]] || return 1
+  [[ -f "$NGINX_SRV_CRT" ]] || return 1
+
+  # symlink이면 dev 모드로 분류 (production이라고 판정하지 않음)
+  if [[ -L "$NGINX_SRV_CRT" ]]; then
+    return 1
+  fi
+
+  # 일반 파일이면 issuer 추가 검사
   local issuer
-  issuer=$(openssl x509 -in "$SRV_CRT" -noout -issuer 2>/dev/null || true)
+  issuer=$(openssl x509 -in "$NGINX_SRV_CRT" -noout -issuer 2>/dev/null || true)
   if echo "$issuer" | grep -q "Local Dev Root CA"; then
-    return 1   # 우리가 만든 dev cert
+    return 1   # 우연히 일반 파일이지만 우리 CA가 서명한 것 → dev로 분류
   fi
   return 0     # 외부에서 배치한 cert
 }
 
-# 개발용 cert 전체가 codex 호환 형태로 valid한지 검증
+# 개발용 dev cert chain 전체가 codex 호환 형태로 valid한지 검증
 is_valid_dev_cert() {
   _cert_paths
   [[ -f "$CA_KEY" && -f "$CA_CRT" && -f "$SRV_KEY" && -f "$SRV_CRT" ]] || return 1
+  # nginx가 들이밀 cert이 dev/* 를 가리키는 symlink인지 검사
+  [[ -L "$NGINX_SRV_CRT" && -L "$NGINX_SRV_KEY" ]] || return 1
+  # symlink 대상이 dev/ 안의 파일인지
+  local crt_target key_target
+  crt_target=$(readlink "$NGINX_SRV_CRT" 2>/dev/null || true)
+  key_target=$(readlink "$NGINX_SRV_KEY" 2>/dev/null || true)
+  [[ "$crt_target" == "dev/server.crt" && "$key_target" == "dev/server.key" ]] || return 1
 
   local text
   text=$(openssl x509 -in "$SRV_CRT" -noout -text 2>/dev/null) || return 1
@@ -95,8 +119,11 @@ is_valid_dev_cert() {
 
 generate_dev_tls_cert() {
   _cert_paths
-  info "Generating Local Dev Root CA + server cert (codex-friendly chain)..."
-  mkdir -p "${BASE_DIR}/nginx/certs"
+  info "Generating Local Dev Root CA + server cert (codex-friendly chain) into ${DEV_DIR}/"
+  mkdir -p "$DEV_DIR"
+
+  # 기존 dev/ 산출물 초기화 (남은 시리얼/csr 등 정리)
+  rm -f "$CA_KEY" "$CA_CRT" "$CA_SERIAL" "$SRV_KEY" "$SRV_CRT" "$SRV_CSR" "$SRV_CNF" "$SRV_EXT"
 
   # 1) Root CA key + self-signed CA cert (5y)
   openssl genrsa -out "$CA_KEY" 4096 2>/dev/null
@@ -142,10 +169,20 @@ EOF
   chmod 600 "$CA_KEY" "$SRV_KEY"
   chmod 644 "$CA_CRT" "$SRV_CRT"
 
+  # 7) Nginx가 실제로 들이밀 cert을 dev/* 로의 *상대 symlink*로 노출.
+  #    → 호스트와 컨테이너(/etc/nginx/certs/) 양쪽에서 정상 resolve
+  #    → ls -la nginx/certs/ 에서 dev 모드임이 한눈에 보임
+  #    → 운영 cert으로 교체 시 사용자가 그냥 symlink를 덮어쓰면 됨
+  ( cd "$CERTS_DIR" && rm -f server.crt server.key \
+      && ln -s dev/server.crt server.crt \
+      && ln -s dev/server.key server.key )
+
   DEV_CERT_REGENERATED=true
   ok "Dev TLS chain generated"
-  ok "  CA cert:     ${CA_CRT}  (install this to OS trust store)"
-  ok "  Server cert: ${SRV_CRT}  (SAN: DNS:localhost, IP:127.0.0.1; CA:FALSE)"
+  ok "  Local Dev Root CA: ${CA_CRT}  (this is what goes into OS trust store)"
+  ok "  Dev leaf cert:     ${SRV_CRT}  (SAN: DNS:localhost, IP:127.0.0.1; CA:FALSE)"
+  ok "  Nginx symlinks:    ${NGINX_SRV_CRT} -> dev/server.crt"
+  ok "                     ${NGINX_SRV_KEY} -> dev/server.key"
 }
 
 _print_manual_ca_install() {
@@ -499,8 +536,15 @@ phase_summary() {
   echo "  API base:        https://localhost/v1"
   echo "  Master Key:      ${mk}"
   echo ""
-  echo "  Local dev CA:    ${CA_CRT}"
-  echo "  Nginx server:    ${SRV_CRT}"
+  echo "  TLS layout:      ${CERTS_DIR}/"
+  echo "                     server.crt -> dev/server.crt  (dev mode symlink)"
+  echo "                     server.key -> dev/server.key  (dev mode symlink)"
+  echo "                     dev/local-root-ca.crt  ← register THIS in OS trust store"
+  echo "                     dev/local-root-ca.key  (chmod 600)"
+  echo "                     dev/server.{crt,key,csr}, dev/server-*.cnf"
+  echo ""
+  echo "  운영 cert으로 교체: ${NGINX_SRV_CRT} 와 ${NGINX_SRV_KEY} 를 사내 CA"
+  echo "                    발급 파일로 덮어쓰면 됨 (symlink가 일반 파일로 바뀌고 dev/ 무시됨)"
   echo ""
   echo "  Virtual Keys:    ${BASE_DIR}/scripts/sample-keys.txt   (10 lines, DO NOT COMMIT)"
   echo ""

@@ -4,16 +4,16 @@ openbao/data/
 openbao/logs/
 openbao/init-keys.json
 postgres/
+# 운영 cert이 들어가는 자리 (사내 CA 발급 파일 또는 dev 모드의 symlink)
 nginx/certs/server.key
 nginx/certs/server.crt
-nginx/certs/server.csr
-nginx/certs/server-openssl.cnf
-nginx/certs/server-ext.cnf
-nginx/certs/local-root-ca.key
-nginx/certs/local-root-ca.crt
-nginx/certs/local-root-ca.srl
+# 로컬 dev 산출물 전용 디렉토리 (운영과 분리)
+nginx/certs/dev/
+# 기타 보조 파일
 nginx/certs/backup-*/
 nginx/certs/*.srl
+nginx/certs/*.csr
+nginx/certs/*.cnf
 scripts/sample-keys.txt
 secrets/
 *.log
