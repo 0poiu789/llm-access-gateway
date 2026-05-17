@@ -121,7 +121,16 @@ getent hosts llm-gateway.<사내도메인>
 FQDN: llm-gateway.<사내도메인>
 SAN: DNS:llm-gateway.<사내도메인>
 형식: PEM
+Key Usage:
+  - Digital Signature
+  - Key Encipherment
+Extended Key Usage:
+  - TLS Web Server Authentication (serverAuth)
+Basic Constraints:
+  - CA:FALSE  (leaf 서버 인증서임을 명시)
 ```
+
+> EKU `serverAuth` 와 Basic Constraints `CA:FALSE` 는 대부분의 사내 CA가 서버 인증서 발급 시 자동으로 포함하지만, 명시적으로 요청해 두면 codex 같은 strict TLS 클라이언트(rustls 기반)와의 호환성 문제(`CaUsedAsEndEntity`)를 사전 차단할 수 있다.
 
 필요한 파일은 다음과 같다.
 
@@ -239,6 +248,13 @@ Nginx 컨테이너를 재시작한다.
 docker compose restart nginx
 ```
 
+### `./start.sh` 와 `./reset.sh` 동작
+
+- `./start.sh` 는 `nginx/certs/server.crt` 가 이미 존재하고 issuer 가 **Local Dev Root CA 가 아닐 때**(= 사내 CA가 발급한 운영 cert) 자동으로 보존한다. 새 dev cert으로 덮어쓰지 않는다.
+  - 더 보수적으로 잠그려면 `export USE_EXISTING_TLS_CERT=true ./start.sh` — issuer 검사 없이 무조건 보존.
+- ⚠️ **`./reset.sh` 는 `nginx/certs/server.*` 를 삭제한다.** 사내 CA 인증서를 배치한 운영 환경에서 reset 을 실행하면 운영 cert/key 가 함께 날아간다.
+  - 운영 cert 원본은 **이 리포지토리 바깥의 안전한 경로**(예: 사내 KMS, `/etc/ssl/private/llm-gateway/`)에 별도 보관하고, reset 후에는 본 §7 절차를 다시 수행해 cert 을 재배치해야 한다.
+
 ---
 
 ## 8. 인증서 내용 확인
@@ -277,7 +293,7 @@ export OPENAI_API_KEY="<LiteLLM Virtual Key>"
 
 ```bash
 curl https://llm-gateway.<사내도메인>/v1/models \
-  -H "Authorization: Bearer $OPENAI_API_KEY" | jq
+  -H "Authorization: Bearer $OPENAI_API_KEY" | python3 -m json.tool
 ```
 
 정상적으로 응답이 오면 인증서 검증이 통과한 것이다.
@@ -331,7 +347,7 @@ codex
 3. Codex CLI가 OS trust store와 다른 trust store를 사용하는 경우
 ```
 
-이 경우 사내 Root CA 인증서를 WSL에 등록한다.
+이 경우 사내 Root CA 인증서를 WSL/리눅스에 등록한다.
 
 ```bash
 sudo cp <사내-root-ca.crt> /usr/local/share/ca-certificates/company-root-ca.crt
@@ -342,8 +358,30 @@ sudo update-ca-certificates
 
 ```bash
 curl https://llm-gateway.<사내도메인>/v1/models \
-  -H "Authorization: Bearer $OPENAI_API_KEY" | jq
+  -H "Authorization: Bearer $OPENAI_API_KEY" | python3 -m json.tool
 ```
+
+### Codex CLI trust store 주의
+
+Codex CLI 는 내부 TLS 구현/빌드 옵션에 따라 OS trust store 를 그대로 따를 수도, 별도 trust 저장소를 쓸 수도 있다. 따라서 사내 Root CA 를 OS/WSL trust store 에 등록한 뒤에도 Codex 에서만 인증서 오류가 지속될 가능성이 0은 아니다.
+
+실험적으로는 본 PoC 의 dev 모드(`./start.sh` 가 생성한 Local Dev Root CA + 그 CA 로 서명된 leaf)에 대해 `update-ca-certificates` 후 codex CLI v0.130 이 `-k` 없이 정상 동작했다. 운영 환경의 사내 CA 도 동일하게 OS trust store 경로로 충분할 가능성이 높지만, **사내 codex 버전/빌드에 따른 검증을 별도로 진행할 것을 권장**.
+
+우선 다음 순서로 확인한다.
+
+1. `curl` 으로 `-k` 없이 Gateway 호출이 성공하는지.
+2. Codex 에서 동일 URL 로 호출이 성공하는지.
+3. Codex 만 실패하면 Codex 가 사용하는 trust 저장소나 실행 방식 차이를 의심한다.
+
+필요 시 다음 환경변수를 한 번씩 시도해 본다 (Codex 버전/내부 transport 에 따라 효과 유무가 다름):
+
+```bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt          # 일부 Rust/Python
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt     # python requests
+export NODE_EXTRA_CA_CERTS=/path/to/company-root-ca.crt          # nodejs
+```
+
+사내 운영 표준 흐름은 **사내 CA 가 발급한 정식 cert + 사내 DNS 이름** 이며, 위 환경변수 회피는 어디까지나 트러블슈팅 보조 수단이다.
 
 ---
 
@@ -374,7 +412,49 @@ SAN: DNS:llm-gateway.<사내도메인>
 
 ---
 
-## 13. 담당 부서 요청 문구
+## 13. 인증서 갱신 / 회전
+
+서버 인증서는 사내 정책에 따라 보통 1~2년 유효. 만료 전에 같은 FQDN 으로 신규 fullchain + private key 를 사내 CA 에서 재발급받아 교체한다.
+
+```bash
+cd ~/llm-access-gateway
+
+# 1) 기존 cert 백업 (race-free 패턴 — 타임스탬프 한 번만 계산)
+BACKUP="nginx/certs/backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP"
+cp -L nginx/certs/server.crt nginx/certs/server.key "$BACKUP/" 2>/dev/null || true
+
+# 2) 새 cert 배치
+cp /path/to/new-llm-gateway-fullchain.crt nginx/certs/server.crt
+cp /path/to/new-llm-gateway.key           nginx/certs/server.key
+chmod 644 nginx/certs/server.crt
+chmod 600 nginx/certs/server.key
+
+# 3) Nginx 재시작
+docker compose restart nginx
+
+# 4) 검증 — -k 없이 통과해야 함
+openssl x509 -in nginx/certs/server.crt -noout -dates
+curl https://llm-gateway.<사내도메인>/v1/models \
+  -H "Authorization: Bearer $OPENAI_API_KEY" | python3 -m json.tool
+```
+
+### 갱신 시점 모니터링
+
+만료일을 정기적으로 확인하려면 cron 또는 모니터링 시스템에 다음을 등록:
+
+```bash
+# 만료까지 30일 미만이면 1, 아니면 0
+openssl x509 -in nginx/certs/server.crt -noout -checkend $((30*86400)); echo $?
+```
+
+→ `1` 이면 30일 이내 만료. 사내 CA 담당자에게 재발급 요청 시작.
+
+> ⚠️ 갱신 작업 직전에 `./reset.sh` 를 절대 실행하지 말 것 (현재 cert 이 함께 날아감). 갱신 후 백업 확보까지 보수적으로 진행.
+
+---
+
+## 14. 담당 부서 요청 문구
 
 아래 문구를 사내 DNS/인증서 담당 부서에 전달한다.
 
@@ -393,17 +473,22 @@ LLM Access Gateway를 사내 HTTPS 서비스로 운영하려고 합니다.
 - SAN: DNS:llm-gateway.<사내도메인>
 - 용도: Nginx HTTPS 서버 인증서
 - 형식: PEM
+- Key Usage: Digital Signature, Key Encipherment
+- Extended Key Usage: TLS Web Server Authentication (serverAuth)
+- Basic Constraints: CA:FALSE  (leaf 서버 인증서)
 - 필요 파일:
-  1. fullchain 인증서
+  1. fullchain 인증서 (서버 cert + intermediate chain)
   2. private key
 
 사용 목적:
 Codex CLI 사용자가 https://llm-gateway.<사내도메인>/v1 로 LiteLLM Proxy에 접속하기 위함입니다.
+Codex CLI는 strict TLS(rustls) 기반이라 EKU serverAuth + Basic Constraints CA:FALSE 가 명시된
+정식 leaf 서버 인증서가 필요합니다.
 ```
 
 ---
 
-## 14. 요약
+## 15. 요약
 
 사내 운영을 위한 권장 구조는 다음과 같다.
 
