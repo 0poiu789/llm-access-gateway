@@ -42,6 +42,7 @@ run_test "05 — OpenBao integration"    "${TESTS_DIR}/05-test-vault-integration
 run_test "06 — RBAC"                   "${TESTS_DIR}/06-test-rbac.sh"
 run_test "07 — IP binding roundtrip"   "${TESTS_DIR}/07-test-ip-binding.sh"
 run_test "08 — AppRole + audit"        "${TESTS_DIR}/08-test-approle-audit.sh"
+run_test "09 — Dev TLS chain"          "${TESTS_DIR}/09-test-dev-tls-cert.sh"
 
 echo ""
 echo "═════════════════════════════════════════"

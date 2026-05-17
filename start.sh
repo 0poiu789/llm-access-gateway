@@ -34,6 +34,192 @@ detect_host_ip() {
 }
 
 # ════════════════════════════════════════════
+# 개인 개발용 TLS — Local Root CA + Root-signed leaf
+# ════════════════════════════════════════════
+# 배경: 단일 self-signed server.crt는 codex(rustls)가 거부한다 —
+#   - basicConstraints CA:TRUE 가 박혀있으면 CaUsedAsEndEntity
+#   - trust 안 된 issuer면 UnknownIssuer
+# 해결: 별도 Root CA(local-root-ca.crt)를 만들어 OS trust store에 등록하고,
+#       서버 cert(server.crt)은 그 CA로 서명된 leaf cert으로 생성한다.
+# CA가 운영용(사내 CA 서명)이면 자동 재생성을 건너뛴다.
+# ════════════════════════════════════════════
+CERTS_DIR_VAR=""   # 함수가 BASE_DIR을 참조하기 전에 set
+CA_INSTALL_NAME="llm-access-gateway-local-root-ca.crt"
+LOCAL_CA_SUBJECT="/C=KR/O=PoC/CN=Local Dev Root CA"
+DEV_CERT_REGENERATED=false
+
+_cert_paths() {
+  CA_KEY="${BASE_DIR}/nginx/certs/local-root-ca.key"
+  CA_CRT="${BASE_DIR}/nginx/certs/local-root-ca.crt"
+  SRV_KEY="${BASE_DIR}/nginx/certs/server.key"
+  SRV_CRT="${BASE_DIR}/nginx/certs/server.crt"
+  SRV_CSR="${BASE_DIR}/nginx/certs/server.csr"
+  SRV_CNF="${BASE_DIR}/nginx/certs/server-openssl.cnf"
+  SRV_EXT="${BASE_DIR}/nginx/certs/server-ext.cnf"
+  CA_SERIAL="${BASE_DIR}/nginx/certs/local-root-ca.srl"
+}
+
+# 외부(사내 CA 등) 인증서가 배치된 상태인지 — issuer가 우리가 발급한 Local Dev Root CA가 아니면 production으로 간주
+is_production_cert() {
+  _cert_paths
+  [[ -f "$SRV_CRT" ]] || return 1
+  local issuer
+  issuer=$(openssl x509 -in "$SRV_CRT" -noout -issuer 2>/dev/null || true)
+  if echo "$issuer" | grep -q "Local Dev Root CA"; then
+    return 1   # 우리가 만든 dev cert
+  fi
+  return 0     # 외부에서 배치한 cert
+}
+
+# 개발용 cert 전체가 codex 호환 형태로 valid한지 검증
+is_valid_dev_cert() {
+  _cert_paths
+  [[ -f "$CA_KEY" && -f "$CA_CRT" && -f "$SRV_KEY" && -f "$SRV_CRT" ]] || return 1
+
+  local text
+  text=$(openssl x509 -in "$SRV_CRT" -noout -text 2>/dev/null) || return 1
+
+  echo "$text" | grep -q "DNS:localhost" || return 1
+  echo "$text" | grep -q "IP Address:127.0.0.1" || return 1
+  echo "$text" | grep -A 1 "X509v3 Basic Constraints" | grep -q "CA:FALSE" || return 1
+  echo "$text" | grep -A 1 "Extended Key Usage" | grep -q "TLS Web Server Authentication" || return 1
+
+  # issuer가 우리 CA여야 함
+  local srv_issuer ca_subject
+  srv_issuer=$(openssl x509 -in "$SRV_CRT" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
+  ca_subject=$(openssl x509 -in "$CA_CRT" -noout -subject 2>/dev/null | sed 's/^subject=//')
+  [[ "$srv_issuer" == "$ca_subject" ]] || return 1
+
+  return 0
+}
+
+generate_dev_tls_cert() {
+  _cert_paths
+  info "Generating Local Dev Root CA + server cert (codex-friendly chain)..."
+  mkdir -p "${BASE_DIR}/nginx/certs"
+
+  # 1) Root CA key + self-signed CA cert (5y)
+  openssl genrsa -out "$CA_KEY" 4096 2>/dev/null
+  openssl req -x509 -new -nodes -key "$CA_KEY" -sha256 -days 1825 \
+    -out "$CA_CRT" \
+    -subj "$LOCAL_CA_SUBJECT" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    2>/dev/null
+
+  # 2) 서버 key
+  openssl genrsa -out "$SRV_KEY" 2048 2>/dev/null
+
+  # 3) CSR config
+  cat > "$SRV_CNF" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+prompt = no
+
+[req_distinguished_name]
+C  = KR
+O  = PoC
+CN = localhost
+EOF
+
+  # 4) CSR
+  openssl req -new -key "$SRV_KEY" -out "$SRV_CSR" -config "$SRV_CNF" 2>/dev/null
+
+  # 5) 서명용 extensions (CA:FALSE + serverAuth + SAN)
+  cat > "$SRV_EXT" <<'EOF'
+basicConstraints     = critical,CA:FALSE
+keyUsage             = critical,digitalSignature,keyEncipherment
+extendedKeyUsage     = serverAuth
+subjectAltName       = DNS:localhost,IP:127.0.0.1
+EOF
+
+  # 6) CA로 서명 (825d — modern TLS 정책의 leaf 상한)
+  openssl x509 -req -in "$SRV_CSR" \
+    -CA "$CA_CRT" -CAkey "$CA_KEY" -CAcreateserial \
+    -out "$SRV_CRT" -days 825 -sha256 \
+    -extfile "$SRV_EXT" 2>/dev/null
+
+  chmod 600 "$CA_KEY" "$SRV_KEY"
+  chmod 644 "$CA_CRT" "$SRV_CRT"
+
+  DEV_CERT_REGENERATED=true
+  ok "Dev TLS chain generated"
+  ok "  CA cert:     ${CA_CRT}  (install this to OS trust store)"
+  ok "  Server cert: ${SRV_CRT}  (SAN: DNS:localhost, IP:127.0.0.1; CA:FALSE)"
+}
+
+_print_manual_ca_install() {
+  warn "Manual install (run once):"
+  warn "  sudo cp ${CA_CRT} /usr/local/share/ca-certificates/${CA_INSTALL_NAME}"
+  warn "  sudo update-ca-certificates"
+  warn "그 외 OS는 docs/local-dev-codex-tls.md 참조."
+}
+
+install_local_root_ca_if_possible() {
+  _cert_paths
+  local auto="${AUTO_INSTALL_DEV_CA:-true}"
+
+  if [[ "$auto" != "true" ]]; then
+    info "AUTO_INSTALL_DEV_CA=false; skipping OS trust store install"
+    _print_manual_ca_install
+    return 0
+  fi
+
+  if [[ ! -d /usr/local/share/ca-certificates ]] || ! command -v update-ca-certificates >/dev/null; then
+    warn "Not a Debian/Ubuntu trust store layout; skipping auto install"
+    _print_manual_ca_install
+    return 0
+  fi
+
+  local target="/usr/local/share/ca-certificates/${CA_INSTALL_NAME}"
+
+  if [[ -f "$target" ]] && cmp -s "$target" "$CA_CRT" 2>/dev/null; then
+    ok "Local dev Root CA already in OS trust store (${target})"
+    return 0
+  fi
+
+  info "Installing Local Dev Root CA to OS trust store (sudo required)..."
+  info "  ⓘ Cancel with Ctrl-C if you prefer manual install — start.sh will continue regardless."
+
+  if sudo cp "$CA_CRT" "$target" 2>/dev/null \
+     && sudo update-ca-certificates >/dev/null 2>&1; then
+    ok "Local Dev Root CA installed at ${target}"
+  else
+    warn "sudo install failed or cancelled — start.sh continues."
+    _print_manual_ca_install
+  fi
+}
+
+ensure_dev_tls_cert() {
+  _cert_paths
+
+  # USE_EXISTING_TLS_CERT=true 면 무조건 보존 (운영 cert 케이스)
+  if [[ "${USE_EXISTING_TLS_CERT:-false}" == "true" ]]; then
+    if [[ -f "$SRV_CRT" && -f "$SRV_KEY" ]]; then
+      ok "USE_EXISTING_TLS_CERT=true — preserving existing TLS files (no dev cert generation)"
+      return 0
+    fi
+    warn "USE_EXISTING_TLS_CERT=true but cert files missing; falling back to dev cert generation"
+  fi
+
+  # 사내 CA 발급된 cert이면 자동 재생성 금지
+  if is_production_cert; then
+    ok "Existing TLS certificate detected (issuer != Local Dev Root CA)"
+    ok "  Skipping dev cert generation — managed externally"
+    return 0
+  fi
+
+  if is_valid_dev_cert; then
+    ok "Local dev TLS chain is valid"
+  else
+    [[ -f "$SRV_CRT" ]] && info "Existing dev TLS chain incomplete or invalid — regenerating"
+    generate_dev_tls_cert
+  fi
+
+  install_local_root_ca_if_possible
+}
+
+# ════════════════════════════════════════════
 # Phase 0: Pre-flight
 # ════════════════════════════════════════════
 phase_preflight() {
@@ -135,19 +321,9 @@ PY
     fi
   fi
 
-  # TLS self-signed cert
-  if [[ ! -f "${BASE_DIR}/nginx/certs/server.crt" ]]; then
-    info "Generating self-signed TLS certificate..."
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout "${BASE_DIR}/nginx/certs/server.key" \
-      -out "${BASE_DIR}/nginx/certs/server.crt" \
-      -subj "/C=KR/ST=Seoul/L=Seoul/O=PoC/CN=llm-gateway.local" \
-      2>/dev/null
-    chmod 600 "${BASE_DIR}/nginx/certs/server.key"
-    ok "TLS certificate generated (1y validity)"
-  else
-    ok "TLS certificate exists"
-  fi
+  # TLS dev certs — Local Root CA + Root-signed leaf for https://localhost
+  # (단일 self-signed cert은 codex의 rustls가 CaUsedAsEndEntity로 거부함)
+  ensure_dev_tls_cert
 
   # Make all scripts executable
   chmod +x "${BASE_DIR}/scripts/"*.sh "${BASE_DIR}/tests/"*.sh "${BASE_DIR}"/*.sh 2>/dev/null || true
@@ -273,6 +449,14 @@ phase_start_remaining() {
   docker compose "${COMPOSE_FILES[@]}" up -d postgres litellm nginx
   ok "Containers started"
 
+  # 인증서가 이번 run에서 재생성됐으면 nginx는 옛 cert을 잡고 있을 수 있음 → 재시작
+  if [[ "${DEV_CERT_REGENERATED:-false}" == "true" ]] \
+     && docker ps --format '{{.Names}}' | grep -qx llm-nginx; then
+    info "TLS cert regenerated — reloading nginx with new cert..."
+    docker compose "${COMPOSE_FILES[@]}" restart nginx >/dev/null
+    ok "nginx reloaded"
+  fi
+
   bold "[Phase 5b] Wait for LiteLLM readiness"
   bash "${BASE_DIR}/scripts/04-health-check.sh"
 }
@@ -304,28 +488,48 @@ phase_tests() {
 phase_summary() {
   local mk
   mk=$(grep "^LITELLM_MASTER_KEY=" "$ENV_FILE" | cut -d= -f2-)
+  _cert_paths
 
   echo ""
   bold "════════════════════════════════════════════════════"
   bold " LLM Access Gateway is RUNNING"
   bold "════════════════════════════════════════════════════"
   echo ""
-  echo "  Admin UI:    https://localhost/ui   (use Master Key to log in)"
-  echo "  API base:    https://localhost/v1"
-  echo "  Master Key:  ${mk}"
+  echo "  Admin UI:        https://localhost/ui   (login: Master Key)"
+  echo "  API base:        https://localhost/v1"
+  echo "  Master Key:      ${mk}"
   echo ""
-  echo "  10 sample Virtual Keys saved to:"
-  echo "    ${BASE_DIR}/scripts/sample-keys.txt"
+  echo "  Local dev CA:    ${CA_CRT}"
+  echo "  Nginx server:    ${SRV_CRT}"
   echo ""
-  echo "  Quick test (alice's key, alice = user01):"
-  echo "    VKEY=\$(grep '^alice@local ' scripts/sample-keys.txt | awk '{print \$4}')"
-  echo "    curl -sk https://localhost/v1/models -H \"Authorization: Bearer \$VKEY\" | python3 -m json.tool"
+  echo "  Virtual Keys:    ${BASE_DIR}/scripts/sample-keys.txt   (10 lines, DO NOT COMMIT)"
   echo ""
-  echo "  Self-signed TLS — use 'curl -k' or accept browser warning"
+  echo "  ── Codex setup ─────────────────────────────────────"
+  echo "    1) ~/.codex/config.toml:"
+  echo "         model_provider  = \"openai\""
+  echo "         openai_base_url = \"https://localhost/v1\""
+  echo "         model           = \"user01-gpt-4o\""
+  echo "         approval_mode   = \"suggest\""
   echo ""
-  echo "  Stop:        ./stop.sh"
-  echo "  Reset (wipe data): ./reset.sh"
-  echo "  Logs:        docker compose logs -f litellm"
+  echo "    2) Use the Virtual Key (NOT a real OpenAI key):"
+  echo "         export OPENAI_API_KEY=\$(grep '^alice@local ' scripts/sample-keys.txt | awk '{print \$4}')"
+  echo ""
+  echo "    3) When prompted, choose 'Provide your own API key' and paste the sk-... above."
+  echo "       Do NOT use 'Sign in with ChatGPT' — it sends an eyJh... bearer that LiteLLM rejects"
+  echo "       ('expected to start with sk-')."
+  echo ""
+  echo "    4) Run:"
+  echo "         codex"
+  echo ""
+  echo "  ── If https://localhost still says UnknownIssuer ───"
+  echo "    The Local Dev Root CA was not added to OS trust store automatically."
+  echo "    Run once:"
+  echo "         sudo cp ${CA_CRT} /usr/local/share/ca-certificates/${CA_INSTALL_NAME}"
+  echo "         sudo update-ca-certificates"
+  echo "    Other OSes: docs/local-dev-codex-tls.md"
+  echo ""
+  echo "  Stop:       ./stop.sh        Reset: ./reset.sh"
+  echo "  Logs:       docker compose logs -f litellm"
   bold "════════════════════════════════════════════════════"
 }
 

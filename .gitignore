@@ -6,6 +6,14 @@ openbao/init-keys.json
 postgres/
 nginx/certs/server.key
 nginx/certs/server.crt
+nginx/certs/server.csr
+nginx/certs/server-openssl.cnf
+nginx/certs/server-ext.cnf
+nginx/certs/local-root-ca.key
+nginx/certs/local-root-ca.crt
+nginx/certs/local-root-ca.srl
+nginx/certs/backup-*/
+nginx/certs/*.srl
 scripts/sample-keys.txt
 secrets/
 *.log
